@@ -1,0 +1,8 @@
+{
+  "name": "Remix: Project Zenith: The Celestial Eye",
+  "description": "An interactive, real-time celestial observation platform visualizing overhead satellites, planets, and the International Space Station based on selected geographic coordinates.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
