@@ -1,4 +1,4 @@
-# Scope Radar & Satellite Observatory Dome
+# svpg  Scope Radar & Satellite Observatory Dome
 
 An advanced full-stack celestial tracking and observation application designed for real-time tracking of planets, artificial satellites, and the International Space Station (ISS). This system merges high-precision coordinate math with high-fidelity, polar-radar style telemetry visualizations.
 
