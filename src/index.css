@@ -1,0 +1,77 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+  --font-display: "Space Grotesk", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+/* Minimalist, professional engineering-style aesthetic */
+body {
+  background-color: #030408;
+  background-image: 
+    /* Precise technical grid lines (slate/grey) */
+    linear-gradient(to right, rgba(148, 163, 184, 0.04) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(148, 163, 184, 0.04) 1px, transparent 1px),
+    /* Faint, high-precision radar concentric vignette */
+    radial-gradient(circle at 50% 50%, rgba(99, 102, 241, 0.02) 0%, transparent 70%);
+  background-size: 24px 24px, 24px 24px, 100% 100%;
+  background-attachment: fixed;
+  color: #f1f5f9;
+  overflow-x: hidden;
+}
+
+/* Slow rotate helper animations for radar sweeps */
+@keyframes spin-slow {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-spin-slow {
+  animation: spin-slow 60s linear infinite;
+}
+
+/* Highly controlled subtle glowing elements for status readouts */
+.glow-accent {
+  box-shadow: 0 0 12px rgba(99, 102, 241, 0.12);
+}
+
+.glow-indigo {
+  box-shadow: 0 0 16px rgba(99, 102, 241, 0.2);
+}
+
+/* Precision scrollbars fitting for CAD/scientific terminals */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.05);
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.25);
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.45);
+}
+
+/* Monochromatic deep-red field observation mode */
+.night-vision {
+  filter: grayscale(100%) brightness(75%) sepia(100%) hue-rotate(-50deg) saturate(380%) contrast(110%);
+  background-color: #080000 !important;
+}
+
+/* Ensure images, canvasses, maps, and specific elements adapt safely under night-vision filter */
+.night-vision img,
+.night-vision canvas,
+.night-vision .leaflet-tile,
+.night-vision .leaflet-container {
+  filter: grayscale(100%) brightness(60%) sepia(100%) hue-rotate(-50deg) saturate(320%) contrast(105%) !important;
+}
+
