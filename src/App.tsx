@@ -81,7 +81,7 @@ export default function App() {
     return getSunriseSunset(observer.latitude, observer.longitude, dateStr);
   }, [observer.latitude, observer.longitude, activeTime]);
 
-  const [timeMultiplier, setTimeMultiplier] = useState<number>(10); // 1 = Realtime, 10 = Fast, 300 = Warp
+  const [timeMultiplier, setTimeMultiplier] = useState<number>(1); // 1 = Realtime, 10 = Fast, 300 = Warp
   const timerRef = useRef<NodeJS.Timeout | null>(null);
 
   // Telemetries spectrum state
