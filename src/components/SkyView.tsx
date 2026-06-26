@@ -160,7 +160,7 @@ export default function SkyView({
   timeMultiplier
 }: SkyViewProps) {
   const radius = 220;
-  const [hoveredObject, setHoveredObject] = useState<any>(null);
+  const [hoveredObjectId, setHoveredObjectId] = useState<string | null>(null);
 
   const maxMagnitude = useMemo(() => {
     return Math.max(1.0, 4.5 - (bortleScale - 1) * 0.4);
@@ -486,7 +486,32 @@ export default function SkyView({
   const sweepArcY = -radius * Math.cos(Math.PI / 4);
 
   // Active highlighted target details
-  const activeObj = hoveredObject || 
+  const hoveredObject = hoveredObjectId ? (
+    planets.find(p => p.id === hoveredObjectId) || 
+    activeSats.find(s => s.id === hoveredObjectId) || 
+    (iss && hoveredObjectId === 'iss' ? iss : null) ||
+    constellationsList.find(c => c.id === hoveredObjectId) ||
+    (() => {
+      const star = starsMap.get(hoveredObjectId);
+      if (star) {
+        return {
+          id: star.id,
+          name: star.name,
+          type: 'star' as const,
+          color: '#ffffff',
+          size: 3,
+          magnitude: star.magnitude,
+          altitude: star.altitude,
+          azimuth: star.azimuth,
+          localCoordinates: { altitude: star.altitude, azimuth: star.azimuth },
+          description: `A major star in the stellar sphere. Magnitude: ${star.magnitude}`
+        };
+      }
+      return null;
+    })()
+  ) : null;
+
+  const activeObj: any = hoveredObject || 
     planets.find(p => p.id === selectedObjectId) || 
     activeSats.find(s => s.id === selectedObjectId) || 
     (iss && selectedObjectId === 'iss' ? iss : null) ||
@@ -680,9 +705,8 @@ export default function SkyView({
         </div>
       )}
 
-      {/* Dome drawing frame */}
       <div 
-         className="relative flex-1 flex items-center justify-center min-h-[460px] select-none py-2"
+         className="relative flex-1 flex items-center justify-center min-h-[300px] sm:min-h-[400px] lg:min-h-[460px] select-none py-2"
          id="sky-dome-display-frame"
       >
         <svg
@@ -857,7 +881,7 @@ export default function SkyView({
           <g id="radar-constellation-lines">
             {showConstellations && constellationsList.map((constellation) => {
               const isSelected = selectedObjectId === constellation.id;
-              const isHovered = hoveredObject?.id === constellation.id;
+              const isHovered = hoveredObjectId === constellation.id;
 
               // Filter links connecting visible stars
               const visibleTies = constellation.connections
@@ -884,8 +908,8 @@ export default function SkyView({
                     abbreviation: constellation.abbreviation,
                     brightestStar: constellation.brightestStar
                   })}
-                  onMouseEnter={() => setHoveredObject({ ...constellation, type: 'constellation' })}
-                  onMouseLeave={() => setHoveredObject(null)}
+                  onMouseEnter={() => setHoveredObjectId(constellation.id)}
+                  onMouseLeave={() => setHoveredObjectId(null)}
                   className="cursor-pointer group select-none"
                 >
                   {/* Invisible thicker lines to make clicking very easy */}
@@ -926,7 +950,7 @@ export default function SkyView({
           <g id="radar-celestial-stars">
             {showStars && Array.from(starsMap.values()).map((star) => {
               const isSelectedConstStar = selectedObjectId ? star.constellationId === selectedObjectId : false;
-              const isHovered = hoveredObject?.id === star.id;
+              const isHovered = hoveredObjectId === star.id;
               const isDimmed = isAnyConstSelected && !isSelectedConstStar;
 
               // Size and opacity scaling based on star brightness magnitude
@@ -937,8 +961,8 @@ export default function SkyView({
                 <g 
                   key={star.id} 
                   className="transition-all duration-300"
-                  onMouseEnter={() => setHoveredObject({ ...star, type: 'star', id: star.id, localCoordinates: { altitude: star.altitude, azimuth: star.azimuth }, description: `A major star in the stellar sphere. Magnitude: ${star.magnitude}` })}
-                  onMouseLeave={() => setHoveredObject(null)}
+                  onMouseEnter={() => setHoveredObjectId(star.id)}
+                  onMouseLeave={() => setHoveredObjectId(null)}
                 >
                   {/* Glowing halo for selected constellation stars */}
                   {isSelectedConstStar && (
@@ -999,7 +1023,7 @@ export default function SkyView({
               if (!pt) return null;
 
               const isSelected = selectedObjectId === planet.id;
-              const isHovered = hoveredObject?.id === planet.id;
+              const isHovered = hoveredObjectId === planet.id;
               const isDimmed = isAnyConstSelected && selectedObjectId !== planet.id;
 
               return (
@@ -1007,8 +1031,8 @@ export default function SkyView({
                   key={planet.id}
                   transform={`translate(${pt.x}, ${pt.y})`}
                   onClick={() => onSelectObject(planet)}
-                  onMouseEnter={() => setHoveredObject(planet)}
-                  onMouseLeave={() => setHoveredObject(null)}
+                  onMouseEnter={() => setHoveredObjectId(planet.id)}
+                  onMouseLeave={() => setHoveredObjectId(null)}
                   className={`cursor-pointer group transition-all duration-300 ${isDimmed ? 'opacity-30' : ''}`}
                   id={`skyview-planet-${planet.id}`}
                 >
@@ -1059,7 +1083,7 @@ export default function SkyView({
               if (!pt) return null;
 
               const isSelected = selectedObjectId === sat.id;
-              const isHovered = hoveredObject?.id === sat.id;
+              const isHovered = hoveredObjectId === sat.id;
               const isDimmed = isAnyConstSelected && selectedObjectId !== sat.id;
 
               return (
@@ -1067,8 +1091,8 @@ export default function SkyView({
                   key={sat.id}
                   transform={`translate(${pt.x}, ${pt.y})`}
                   onClick={() => onSelectObject(sat)}
-                  onMouseEnter={() => setHoveredObject(sat)}
-                  onMouseLeave={() => setHoveredObject(null)}
+                  onMouseEnter={() => setHoveredObjectId(sat.id)}
+                  onMouseLeave={() => setHoveredObjectId(null)}
                   className={`cursor-pointer group transition-all duration-300 ${isDimmed ? 'opacity-30' : ''}`}
                   id={`skyview-sat-${sat.id}`}
                 >
@@ -1120,15 +1144,15 @@ export default function SkyView({
               if (!pt) return null;
 
               const isSelected = selectedObjectId === "iss";
-              const isHovered = hoveredObject?.id === "iss";
+              const isHovered = hoveredObjectId === "iss";
               const isDimmed = isAnyConstSelected && selectedObjectId !== "iss";
 
               return (
                 <g
                   transform={`translate(${pt.x}, ${pt.y})`}
                   onClick={() => onSelectObject(visibleIss)}
-                  onMouseEnter={() => setHoveredObject(visibleIss)}
-                  onMouseLeave={() => setHoveredObject(null)}
+                  onMouseEnter={() => setHoveredObjectId("iss")}
+                  onMouseLeave={() => setHoveredObjectId(null)}
                   className={`cursor-pointer group transition-all duration-300 ${isDimmed ? 'opacity-30' : ''}`}
                   id="skyview-iss-tracker"
                 >
@@ -1177,8 +1201,8 @@ export default function SkyView({
       </div>
 
       {/* Embedded Real-time Telemetry HUD readout panel */}
-      <div className="bg-slate-950/85 border border-emerald-500/20 rounded-lg p-3 font-mono text-xs leading-relaxed text-emerald-400 shadow-[inset_0_0_12px_rgba(16,185,129,0.04)] mb-4">
-        <div className="flex items-center justify-between border-b border-emerald-500/10 pb-1.5 mb-1.5">
+      <div className="bg-slate-950/85 border border-emerald-500/20 rounded-lg p-3 font-mono text-xs leading-relaxed text-emerald-400 shadow-[inset_0_0_12px_rgba(16,185,129,0.04)] mb-4 h-[135px] flex flex-col">
+        <div className="flex items-center justify-between border-b border-emerald-500/10 pb-1.5 mb-1.5 shrink-0">
           <div className="flex items-center gap-1.5 font-bold uppercase tracking-wider text-emerald-300">
             <Radio className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
             <span>Scope Telemetry Receiver</span>
@@ -1189,29 +1213,31 @@ export default function SkyView({
           </div>
         </div>
         
-        {activeObj ? (
-          <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
-            <div>TARGET: <span className="text-white font-bold uppercase tracking-wide">{activeObj.name}</span></div>
-            <div>STATUS: <span className="font-bold text-emerald-400 uppercase">LOCKED</span></div>
-            <div>ELEVATION: <span className="text-amber-400 font-bold">{activeObj.localCoordinates?.altitude != null ? `${activeObj.localCoordinates.altitude.toFixed(3)}°` : (activeObj.altitude != null ? `${activeObj.altitude.toFixed(3)}°` : 'N/A')}</span></div>
-            <div>AZIMUTH: <span className="text-amber-400 font-bold">{activeObj.localCoordinates?.azimuth != null ? `${activeObj.localCoordinates.azimuth.toFixed(3)}°` : (activeObj.azimuth != null ? `${activeObj.azimuth.toFixed(3)}°` : 'N/A')}</span></div>
-            {activeObj.localCoordinates?.rangeKm != null && (
-              <div className="col-span-2">DISTANCE: <span className="text-emerald-300 font-semibold">{activeObj.localCoordinates.rangeKm.toLocaleString()} km</span></div>
-            )}
-            {activeObj.abbreviation != null && (
-              <div className="col-span-2">CONST ABBR: <span className="text-cyan-400 font-bold">{activeObj.abbreviation} (Brightest: {activeObj.brightestStar})</span></div>
-            )}
-            {activeObj.description && (
-              <div className="col-span-2 text-slate-400 text-xs mt-1.5 italic border-t border-emerald-500/5 pt-1 text-left leading-relaxed">
-                {activeObj.description}
-              </div>
-            )}
-          </div>
-        ) : (
-          <div className="text-slate-500 italic text-center py-2 h-[42px] flex items-center justify-center text-xs">
-            Hover or click any celestial object or constellation on the radar grid to bind telemetry feed.
-          </div>
-        )}
+        <div className="flex-1 overflow-y-auto pr-1">
+          {activeObj ? (
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+              <div>TARGET: <span className="text-white font-bold uppercase tracking-wide">{activeObj.name}</span></div>
+              <div>STATUS: <span className="font-bold text-emerald-400 uppercase">LOCKED</span></div>
+              <div>ELEVATION: <span className="text-amber-400 font-bold">{activeObj.localCoordinates?.altitude != null ? `${activeObj.localCoordinates.altitude.toFixed(3)}°` : (activeObj.altitude != null ? `${activeObj.altitude.toFixed(3)}°` : 'N/A')}</span></div>
+              <div>AZIMUTH: <span className="text-amber-400 font-bold">{activeObj.localCoordinates?.azimuth != null ? `${activeObj.localCoordinates.azimuth.toFixed(3)}°` : (activeObj.azimuth != null ? `${activeObj.azimuth.toFixed(3)}°` : 'N/A')}</span></div>
+              {activeObj.localCoordinates?.rangeKm != null && (
+                <div className="col-span-2">DISTANCE: <span className="text-emerald-300 font-semibold">{activeObj.localCoordinates.rangeKm.toLocaleString()} km</span></div>
+              )}
+              {activeObj.abbreviation != null && (
+                <div className="col-span-2">CONST ABBR: <span className="text-cyan-400 font-bold">{activeObj.abbreviation} (Brightest: {activeObj.brightestStar})</span></div>
+              )}
+              {activeObj.description && (
+                <div className="col-span-2 text-slate-400 text-xs mt-1.5 italic border-t border-emerald-500/5 pt-1 text-left leading-relaxed">
+                  {activeObj.description}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="text-slate-500 italic text-center py-2 h-full flex items-center justify-center text-xs">
+              Hover or click any celestial object or constellation on the radar grid to bind telemetry feed.
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Planisphere details legend block */}

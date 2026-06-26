@@ -75,3 +75,38 @@ body {
   filter: grayscale(100%) brightness(60%) sepia(100%) hue-rotate(-50deg) saturate(320%) contrast(105%) !important;
 }
 
+/* Fade-in animation for tab switches and dynamic panels */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.3s ease-out both;
+}
+
+/* Performance hints for frequently animated elements */
+.leaflet-marker-icon,
+.leaflet-popup,
+.leaflet-overlay-pane svg {
+  will-change: transform;
+}
+
+/* Disable zoom transition during programmatic tracking to avoid map stutter */
+.leaflet-zoom-anim .leaflet-zoom-animated {
+  transition: transform 0.25s cubic-bezier(0.25, 1, 0.5, 1) !important;
+}
+
+/* Smooth panel content transitions */
+#object-card-iss,
+#object-card-tiangong,
+[id^="object-card-"] {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+

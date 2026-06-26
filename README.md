@@ -24,7 +24,7 @@ ZENITH splits the sky into a cohesive, widescreen geocentric grid. Below is the 
 | Panel | Type | Description |
 | :--- | :---: | :--- |
 | **📡 Polar Planisphere** | Center Column | A unified rotating circular radar projection where the center maps directly to the zenith (90° overhead) and the extreme outer edge maps to the local horizon (0° elevation). Features 10° azimuth markers and a continuous neon green sweep. |
-| **🗺️ Geocentric Tracker** | Left Column | A Leaflet-powered global map running in high-resolution photographic satellite mode. Renders live ground track lines (orbit history and future trails), observer horizon circles, and supports click-to-calibrate coordinates. |
+| **🗺️ Geocentric Tracker & 3D Globe** | Left Column | A dual-mode visualization deck. Toggle between a high-precision **3D Canvas Globe** (with interactive rotation, click-to-calibrate coordinates, and 3D satellite orbits) and a **2D Leaflet Photographic Map** (rendering live ground track footprint lines and coordinate captures). |
 | **🌡️ Atmospheric Suitability** | Right Column | Real-time observational forecasting of sky transparency score (Optimal/Moderate/Poor), angular seeing (arcseconds), scintillation index (twinkle freq variance), and Bortle light pollution levels. |
 | **🧪 Spectroscopic Analyzer** | Right Column | Glow-bar chemical signature widget mapping Fraunhofer absorption lines and concentrations (e.g. Venus showing `96.5% CO₂`, Moon showing `21% Silicon`). |
 | **☀ Temporal Warp Harness** | Bottom Bar | Sidereal time-travel simulator (warp speeds from 1x to 300x) allowing historical analysis and transit predictions. |

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { MapContainer, TileLayer, Marker, Popup, useMapEvents, useMap, Polyline, Circle } from 'react-leaflet';
 import L from 'leaflet';
 import { Globe as GlobeIcon, Map as MapIcon, Compass, Lock, Unlock } from 'lucide-react';
@@ -15,10 +15,11 @@ interface GlobeProps {
   currentTime: number;
   selectedObjectId?: string | null;
   timeMultiplier: number;
+  onSelectObject: (obj: CelestialObject | null) => void;
 }
 
 // Math helpers for selected satellite path projection on Globe
-function getSatellitePosition(inclination: number, period: number, altitude: number, seed: number, timestampMs: number) {
+function getSatellitePosition(inclination: number, period: number, altitude: number, seed: number, timestampMs: number, baseTimestampMs?: number) {
   const angleSpeedRad = (2 * Math.PI) / period;
   const seconds = ((timestampMs / 1000) + seed * 100) % period;
   const u = angleSpeedRad * seconds; // Orbit argument
@@ -31,9 +32,10 @@ function getSatellitePosition(inclination: number, period: number, altitude: num
   const latRad = Math.asin(z);
   let rawLngRad = Math.atan2(y, x);
   
-  // Drifting due to Earth rotation
+  // Drifting due to Earth rotation (frozen at baseTimestampMs if provided)
   const earthRateRad = (2 * Math.PI) / 86400;
-  const driftRad = (timestampMs / 1000) * earthRateRad;
+  const driftTimeMs = baseTimestampMs !== undefined ? baseTimestampMs : timestampMs;
+  const driftRad = (driftTimeMs / 1000) * earthRateRad;
   let lngRad = rawLngRad - driftRad + (seed * 0.77);
   lngRad = ((lngRad + Math.PI) % (2 * Math.PI));
   if (lngRad < 0) lngRad += 2 * Math.PI;
@@ -43,6 +45,60 @@ function getSatellitePosition(inclination: number, period: number, altitude: num
     latitude: (latRad * 180) / Math.PI,
     longitude: (lngRad * 180) / Math.PI,
   };
+}
+
+// Helper function to split orbital paths crossing the International Date Line
+function splitPathAtDateLine(rawPath: [number, number][]): [number, number][][] {
+  if (rawPath.length === 0) return [];
+  const segments: [number, number][][] = [];
+  let currentSegment: [number, number][] = [];
+
+  for (let i = 0; i < rawPath.length; i++) {
+    const current = rawPath[i];
+    if (i === 0) {
+      currentSegment.push(current);
+      continue;
+    }
+    const prev = rawPath[i - 1];
+    const [lat1, lng1] = prev;
+    const [lat2, lng2] = current;
+    const diffLng = Math.abs(lng2 - lng1);
+
+    if (diffLng > 180) {
+      let t: number;
+      let latAt180: number;
+
+      if (lng1 > 0 && lng2 < 0) {
+        // Crossing East to West (+180 to -180)
+        const lng2Adjusted = lng2 + 360;
+        t = (180 - lng1) / (lng2Adjusted - lng1);
+        latAt180 = lat1 + t * (lat2 - lat1);
+
+        currentSegment.push([latAt180, 180]);
+        segments.push(currentSegment);
+        currentSegment = [[latAt180, -180], current];
+      } else if (lng1 < 0 && lng2 > 0) {
+        // Crossing West to East (-180 to +180)
+        const lng2Adjusted = lng2 - 360;
+        t = (-180 - lng1) / (lng2Adjusted - lng1);
+        latAt180 = lat1 + t * (lat2 - lat1);
+
+        currentSegment.push([latAt180, -180]);
+        segments.push(currentSegment);
+        currentSegment = [[latAt180, 180], current];
+      } else {
+        segments.push(currentSegment);
+        currentSegment = [current];
+      }
+    } else {
+      currentSegment.push(current);
+    }
+  }
+
+  if (currentSegment.length > 0) {
+    segments.push(currentSegment);
+  }
+  return segments;
 }
 
 // ----------------------------------------------------------------------------
@@ -114,8 +170,14 @@ interface FlyToConfig {
   timestamp: number;
 }
 
-function MapViewController({ flyToCoords }: { flyToCoords: FlyToConfig | null }) {
+// Zoom/Pan animation controller
+function MapViewController({ flyToCoords, timeMultiplier, cameraLocked, programmaticFlyRef }: { flyToCoords: FlyToConfig | null; timeMultiplier: number; cameraLocked: boolean; programmaticFlyRef: React.MutableRefObject<boolean> }) {
   const map = useMap();
+  const lastCenterRef = useRef<[number, number] | null>(null);
+  const targetCoordsRef = useRef<[number, number] | null>(null);
+  const animationFrameRef = useRef<number | null>(null);
+  const cameraLockedRef = useRef(cameraLocked);
+  cameraLockedRef.current = cameraLocked;
 
   useEffect(() => {
     if (!map) return;
@@ -144,31 +206,103 @@ function MapViewController({ flyToCoords }: { flyToCoords: FlyToConfig | null })
     };
   }, [map]);
 
+  // Restart the rAF loop (used after a flyTo animation finishes)
+  const startRafLoop = useCallback(() => {
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current);
+    }
+    const tick = () => {
+      if (targetCoordsRef.current && map) {
+        const [targetLat, targetLng] = targetCoordsRef.current;
+        const currentCenter = map.getCenter();
+        if (!lastCenterRef.current) {
+          lastCenterRef.current = [currentCenter.lat, currentCenter.lng];
+        }
+        const [lastLat, lastLng] = lastCenterRef.current;
+        let diffLng = targetLng - lastLng;
+        if (diffLng > 180) diffLng -= 360;
+        else if (diffLng < -180) diffLng += 360;
+        const baseAlpha = timeMultiplier > 1 ? 0.05 : 0.15;
+        const smoothedLat = lastLat + baseAlpha * (targetLat - lastLat);
+        const smoothedLng = lastLng + baseAlpha * diffLng;
+        lastCenterRef.current = [smoothedLat, smoothedLng];
+        let normLng = ((smoothedLng + 180) % 360);
+        if (normLng < 0) normLng += 360;
+        normLng -= 180;
+        const latChange = Math.abs(smoothedLat - currentCenter.lat);
+        const lngChange = Math.abs(normLng - currentCenter.lng);
+        if (latChange > 0.0001 || lngChange > 0.0001) {
+          map.setView([smoothedLat, normLng], map.getZoom(), { animate: false });
+        }
+      }
+      animationFrameRef.current = requestAnimationFrame(tick);
+    };
+    animationFrameRef.current = requestAnimationFrame(tick);
+  }, [map, timeMultiplier]);
+
+  // Update target when flyToCoords changes
   useEffect(() => {
     if (flyToCoords && Array.isArray(flyToCoords.coords)) {
       const [lat, lng] = flyToCoords.coords;
       if (typeof lat === 'number' && typeof lng === 'number' && !isNaN(lat) && !isNaN(lng)) {
-        if (flyToCoords.type === 'panTo') {
-          // Gently pan the viewport while maintaining the user's current zoom level
-          map.panTo([lat, lng], {
-            animate: true,
-            duration: 0.8
-          });
-        } else {
-          // Fly to target at default zoom level 5 for initial or explicit selections
+        if (flyToCoords.type === 'flyTo') {
+          // Cancel any running requestAnimationFrame to let flyTo run cleanly
+          if (animationFrameRef.current) {
+            cancelAnimationFrame(animationFrameRef.current);
+            animationFrameRef.current = null;
+          }
+          lastCenterRef.current = [lat, lng];
+          targetCoordsRef.current = [lat, lng];
+          // Set programmatic flag to prevent CenterTracker from interpreting this as user drag
+          programmaticFlyRef.current = true;
           map.flyTo([lat, lng], 5, {
             animate: true,
             duration: 1.2,
             easeLinearity: 0.25
           });
+          // When flyTo finishes, clear the flag and restart the rAF loop if still locked
+          const onMoveEnd = () => {
+            programmaticFlyRef.current = false;
+            map.off('moveend', onMoveEnd);
+            if (cameraLockedRef.current) {
+              startRafLoop();
+            }
+          };
+          map.on('moveend', onMoveEnd);
+        } else {
+          // It's a panTo tracking target update
+          targetCoordsRef.current = [lat, lng];
         }
       }
     }
-  }, [flyToCoords, map]);
+  }, [flyToCoords, map, startRafLoop]);
+
+  // RequestAnimationFrame loop for smooth interpolation at screen refresh rate
+  useEffect(() => {
+    if (!cameraLocked) {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+        animationFrameRef.current = null;
+      }
+      return;
+    }
+
+    // Only start rAF if no programmatic flyTo is in progress
+    // (the flyTo onMoveEnd handler will start rAF when it finishes)
+    if (!programmaticFlyRef.current) {
+      startRafLoop();
+    }
+
+    return () => {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+      }
+    };
+  }, [cameraLocked, map, timeMultiplier, startRafLoop]);
   return null;
 }
 
-function CenterTracker({ setViewCenter, onUserInteraction }: { setViewCenter: (center: [number, number]) => void; onUserInteraction: () => void }) {
+function CenterTracker({ setViewCenter, onUserInteraction, programmaticFlyRef }: { setViewCenter: (center: [number, number]) => void; onUserInteraction: () => void; programmaticFlyRef: React.MutableRefObject<boolean> }) {
   const map = useMap();
   useMapEvents({
     move() {
@@ -176,66 +310,59 @@ function CenterTracker({ setViewCenter, onUserInteraction }: { setViewCenter: (c
       setViewCenter([center.lat, center.lng]);
     },
     dragstart() {
-      onUserInteraction();
+      // Only treat as user interaction if NOT a programmatic flyTo
+      if (!programmaticFlyRef.current) {
+        onUserInteraction();
+      }
     },
     zoomstart() {
-      onUserInteraction();
+      // Only treat as user interaction if NOT a programmatic flyTo
+      if (!programmaticFlyRef.current) {
+        onUserInteraction();
+      }
     }
   });
   return null;
 }
 
-export default function Globe({ observer, iss, satellites, onSelectCoordinates, currentTime, selectedObjectId, timeMultiplier }: GlobeProps) {
+export default function Globe({ observer, iss, satellites, onSelectCoordinates, currentTime, selectedObjectId, timeMultiplier, onSelectObject }: GlobeProps) {
   // Mauna Kea (Lat: 19.8206, Lon: -155.4681) as default center on start to sync perfectly
   const DEFAULT_CENTER: [number, number] = [19.8206, -155.4681];
   
   const [flyToCoords, setFlyToCoords] = useState<FlyToConfig | null>(null);
   const [viewCenter, setViewCenter] = useState<[number, number]>(DEFAULT_CENTER);
-  const [animatedCoords, setAnimatedCoords] = useState<[number, number] | null>(null);
   const [cameraLocked, setCameraLocked] = useState<boolean>(true);
   const [mapTheme, setMapTheme] = useState<'dark' | 'satellite'>('satellite');
   const prevSelectedIdRef = useRef<string | null>(null);
+  const programmaticFlyRef = useRef<boolean>(false);
 
-  // Throttle calculations by rounding currentTime to 5 second blocks.
-  // This reduces SGP4/astronomical conversions by 98% during time travel/warp.
+  // Throttle heavy path calculations to once every 5 seconds
   const roundedTime = useMemo(() => Math.floor(currentTime / 5000) * 5000, [currentTime]);
 
-  // Generate 90-minute projected track for the ISS (5-min intervals)
-  const futurePathSegments = useMemo(() => {
+  const rawIssPath = useMemo(() => {
     try {
-      const rawPath = getIssFuturePath(roundedTime);
-      const segments: [number, number][][] = [];
-      let currentSegment: [number, number][] = [];
-      
-      for (let i = 0; i < rawPath.length; i++) {
-        const current = rawPath[i];
-        if (i === 0) {
-          currentSegment.push(current);
-          continue;
-        }
-        const prev = rawPath[i - 1];
-        // If longitude jumps across the international date line / flat projection boundary
-        const diffLng = Math.abs(current[1] - prev[1]);
-        
-        if (diffLng > 180) {
-          segments.push(currentSegment);
-          currentSegment = [current];
-        } else {
-          currentSegment.push(current);
-        }
-      }
-      if (currentSegment.length > 0) {
-        segments.push(currentSegment);
-      }
-      return segments;
-    } catch (err) {
-      console.error("Error setting up projected path segments:", err);
+      return getIssFuturePath(roundedTime);
+    } catch (e) {
+      console.error("Error calculating raw ISS path:", e);
       return [];
     }
   }, [roundedTime]);
 
-  // Generate projected track for the selected satellite (complete orbital period, ~90-100 mins)
-  const satellitePathSegments = useMemo(() => {
+  // Generate 90-minute projected track for the ISS centered at current position
+  const futurePathSegments = useMemo(() => {
+    if (rawIssPath.length === 0 || !iss || !iss.coordinates) return [];
+    const pathCopy = [...rawIssPath];
+    const midIdx = Math.floor(pathCopy.length / 2);
+    if (midIdx >= 0 && midIdx < pathCopy.length) {
+      pathCopy[midIdx] = [iss.coordinates.latitude, iss.coordinates.longitude];
+    }
+    if (pathCopy.length > 0) {
+      pathCopy.push(pathCopy[0]);
+    }
+    return splitPathAtDateLine(pathCopy);
+  }, [rawIssPath, iss?.coordinates?.latitude, iss?.coordinates?.longitude]);
+
+  const rawSatellitePath = useMemo(() => {
     if (!selectedObjectId || selectedObjectId === 'iss') return [];
     
     const selectedSat = satellites.find(s => s.id === selectedObjectId);
@@ -252,46 +379,50 @@ export default function Globe({ observer, iss, satellites, onSelectCoordinates, 
       const steps = 60;
       const stepSizeMs = (periodSec * 1000) / steps;
 
-      for (let i = 0; i <= steps; i++) {
+      for (let i = -30; i <= 30; i++) {
         const futureTimeMs = roundedTime + i * stepSizeMs;
         const pos = getSatellitePosition(
           selectedSat.inclination,
           selectedSat.period,
           selectedSat.altitude,
           seed,
-          futureTimeMs
+          futureTimeMs,
+          roundedTime
         );
         rawPath.push([pos.latitude, pos.longitude]);
       }
-
-      const segments: [number, number][][] = [];
-      let currentSegment: [number, number][] = [];
-      
-      for (let i = 0; i < rawPath.length; i++) {
-        const current = rawPath[i];
-        if (i === 0) {
-          currentSegment.push(current);
-          continue;
-        }
-        const prev = rawPath[i - 1];
-        const diffLng = Math.abs(current[1] - prev[1]);
-        
-        if (diffLng > 180) {
-          segments.push(currentSegment);
-          currentSegment = [current];
-        } else {
-          currentSegment.push(current);
-        }
-      }
-      if (currentSegment.length > 0) {
-        segments.push(currentSegment);
-      }
-      return segments;
+      return rawPath;
     } catch (err) {
-      console.error("Error setting up satellite path segments:", err);
+      console.error("Error setting up satellite path:", err);
       return [];
     }
   }, [selectedObjectId, satellites, roundedTime]);
+
+  // Generate projected track for the selected satellite (complete orbital period, centered on satellite)
+  const satellitePathSegments = useMemo(() => {
+    if (rawSatellitePath.length === 0 || !selectedObjectId) return [];
+    
+    // Find live coords
+    let liveCoords: [number, number] | null = null;
+    const selectedSat = satellites.find(s => s.id === selectedObjectId);
+    if (selectedSat) {
+      const lat = selectedSat.coordinates ? selectedSat.coordinates.latitude : selectedSat.latitude;
+      const lng = selectedSat.coordinates ? selectedSat.coordinates.longitude : selectedSat.longitude;
+      if (typeof lat === 'number' && typeof lng === 'number' && !isNaN(lat) && !isNaN(lng)) {
+        liveCoords = [lat, lng];
+      }
+    }
+    
+    const pathCopy = [...rawSatellitePath];
+    const midIdx = Math.floor(pathCopy.length / 2);
+    if (liveCoords && pathCopy.length > 0 && midIdx >= 0 && midIdx < pathCopy.length) {
+      pathCopy[midIdx] = liveCoords;
+    }
+    if (pathCopy.length > 0) {
+      pathCopy.push(pathCopy[0]);
+    }
+    return splitPathAtDateLine(pathCopy);
+  }, [rawSatellitePath, selectedObjectId, satellites]);
 
   // Automatically fly/pan viewport when the observer coordinates shift
   useEffect(() => {
@@ -329,6 +460,21 @@ export default function Globe({ observer, iss, satellites, onSelectCoordinates, 
     }
   }, [selectedObjectId, satellites, iss]);
 
+  const selectedSatCoords = useMemo(() => {
+    if (!selectedObjectId || selectedObjectId === 'iss') return null;
+    const sat = satellites.find(s => s.id === selectedObjectId);
+    if (!sat) return null;
+    const lat = sat.coordinates ? sat.coordinates.latitude : sat.latitude;
+    const lng = sat.coordinates ? sat.coordinates.longitude : sat.longitude;
+    if (typeof lat === 'number' && typeof lng === 'number' && !isNaN(lat) && !isNaN(lng)) {
+      return [lat, lng] as [number, number];
+    }
+    return null;
+  }, [selectedObjectId, satellites]);
+
+  const selectedSatLat = selectedSatCoords ? selectedSatCoords[0] : null;
+  const selectedSatLng = selectedSatCoords ? selectedSatCoords[1] : null;
+
   // Smoothly follow the moving target on updates if cameraLocked is enabled
   useEffect(() => {
     if (!cameraLocked || !selectedObjectId) return;
@@ -338,89 +484,42 @@ export default function Globe({ observer, iss, satellites, onSelectCoordinates, 
       if (iss && iss.coordinates && typeof iss.coordinates.latitude === 'number' && typeof iss.coordinates.longitude === 'number') {
         coords = [iss.coordinates.latitude, iss.coordinates.longitude];
       }
-    } else {
-      const sat = satellites.find(s => s.id === selectedObjectId);
-      if (sat && typeof sat.latitude === 'number' && typeof sat.longitude === 'number') {
-        coords = [sat.latitude, sat.longitude];
-      }
+    } else if (selectedSatCoords) {
+      coords = selectedSatCoords;
     }
 
     if (coords) {
       setFlyToCoords({ coords, type: 'panTo', timestamp: Date.now() });
     }
-  }, [cameraLocked, selectedObjectId, iss?.coordinates?.latitude, iss?.coordinates?.longitude, satellites]);
+  }, [cameraLocked, selectedObjectId, iss?.coordinates?.latitude, iss?.coordinates?.longitude, selectedSatLat, selectedSatLng]);
 
-  // Smooth position interpolation for ISS
-  useEffect(() => {
-    if (!iss || !iss.coordinates || typeof iss.coordinates.latitude !== 'number' || typeof iss.coordinates.longitude !== 'number' || isNaN(iss.coordinates.latitude) || isNaN(iss.coordinates.longitude)) {
-      setAnimatedCoords(null);
-      return;
-    }
 
-    const targetLat = iss.coordinates.latitude;
-    const targetLng = iss.coordinates.longitude;
-
-    if (!animatedCoords) {
-      setAnimatedCoords([targetLat, targetLng]);
-      return;
-    }
-
-    const startLat = animatedCoords[0];
-    let startLng = animatedCoords[1];
-
-    // Handle wrapping of longitude smoothly if crossing international date line
-    let diffLng = targetLng - startLng;
-    if (diffLng > 180) {
-      startLng += 360;
-    } else if (diffLng < -180) {
-      startLng -= 360;
-    }
-
-    // Adjust animation duration depending on simulation rate (fast timeline means fast glide)
-    const duration = timeMultiplier === 300 ? 30 : (timeMultiplier === 10 ? 200 : 2000);
-    const startTime = performance.now();
-
-    let animationId: number;
-
-    const animate = (currentTime: number) => {
-      const elapsed = currentTime - startTime;
-      const progress = Math.min(elapsed / duration, 1);
-      
-      // Smooth sinusoidal interpolation
-      const ease = Math.sin((progress * Math.PI) / 2);
-
-      const currentLat = startLat + (targetLat - startLat) * ease;
-      const currentLng = startLng + (targetLng - startLng) * ease;
-
-      // Wrap longitude back to standard [-180, 180] before setting
-      let wrappedLng = ((currentLng + 180) % 360);
-      if (wrappedLng < 0) wrappedLng += 360;
-      wrappedLng -= 180;
-
-      setAnimatedCoords([currentLat, wrappedLng]);
-
-      if (progress < 1) {
-        animationId = requestAnimationFrame(animate);
-      }
-    };
-
-    animationId = requestAnimationFrame(animate);
-
-    return () => {
-      cancelAnimationFrame(animationId);
-    };
-  }, [iss?.coordinates?.latitude, iss?.coordinates?.longitude, timeMultiplier]);
 
   // Focus action triggered from the panel header
   const handleFocusStation = () => {
     if (observer && typeof observer.latitude === 'number' && typeof observer.longitude === 'number' && !isNaN(observer.latitude) && !isNaN(observer.longitude)) {
+      setCameraLocked(false);
       setFlyToCoords({ coords: [observer.latitude, observer.longitude], type: 'flyTo', timestamp: Date.now() });
     }
   };
 
-  const handleFocusChennai = () => {
-    // Calibrate the ground station to Chennai so and keep panels, calculations and map fully synced
-    onSelectCoordinates(13.0827, 80.2707);
+  const handleFocusLiveLocation = () => {
+    setCameraLocked(false);
+    if (typeof window !== 'undefined' && navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          const { latitude, longitude } = position.coords;
+          onSelectCoordinates(latitude, longitude);
+        },
+        (error) => {
+          console.warn("Geolocation access denied or failed:", error);
+          alert("Could not acquire live location. Please check browser location permissions.");
+        },
+        { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
+      );
+    } else {
+      alert("Geolocation is not supported by this browser.");
+    }
   };
 
   const handleMapClick = (lat: number, lng: number) => {
@@ -432,6 +531,7 @@ export default function Globe({ observer, iss, satellites, onSelectCoordinates, 
     // Standardize latitude between [-90, 90]
     const normalLat = Math.max(-90, Math.min(90, lat));
 
+    setCameraLocked(false);
     onSelectCoordinates(normalLat, normalLng);
   };
 
@@ -462,15 +562,22 @@ export default function Globe({ observer, iss, satellites, onSelectCoordinates, 
           {/* Camera Lock Toggle */}
           <button
             onClick={() => {
-              setCameraLocked(!cameraLocked);
-              if (!cameraLocked && selectedObjectId) {
+              const newLocked = !cameraLocked;
+              setCameraLocked(newLocked);
+              if (newLocked && selectedObjectId) {
                 // Focus on the selected object immediately when re-locking
                 let coords: [number, number] | null = null;
                 if (selectedObjectId === 'iss') {
                   if (iss && iss.coordinates) coords = [iss.coordinates.latitude, iss.coordinates.longitude];
                 } else {
                   const sat = satellites.find(s => s.id === selectedObjectId);
-                  if (sat) coords = [sat.latitude ?? 0, sat.longitude ?? 0];
+                  if (sat) {
+                    const lat = sat.coordinates ? sat.coordinates.latitude : sat.latitude;
+                    const lng = sat.coordinates ? sat.coordinates.longitude : sat.longitude;
+                    if (typeof lat === 'number' && typeof lng === 'number') {
+                      coords = [lat, lng];
+                    }
+                  }
                 }
                 if (coords) {
                   setFlyToCoords({ coords, type: 'flyTo', timestamp: Date.now() });
@@ -505,302 +612,349 @@ export default function Globe({ observer, iss, satellites, onSelectCoordinates, 
             <span>STATION</span>
           </button>
           <button
-            onClick={handleFocusChennai}
+            onClick={handleFocusLiveLocation}
             className="p-1 px-2.5 rounded-lg border border-slate-800 bg-slate-900/60 text-xs text-slate-400 hover:text-white transition flex items-center gap-1 font-mono hover:border-indigo-500/50 cursor-pointer"
-            title="Focus map on default center (Chennai)"
-            id="snap-chennai-btn"
+            title="Acquire and focus map on your live browser location"
+            id="snap-live-loc-btn"
           >
-            <GlobeIcon className="w-2.5 h-2.5 text-emerald-400" />
-            <span>CHENNAI</span>
+            <Compass className="w-2.5 h-2.5 text-emerald-400" />
+            <span>LIVE LOC</span>
           </button>
         </div>
       </div>
 
-      {/* Full-width, responsive leaflet container */}
-      <div className="relative flex-1 min-h-[300px] w-full rounded-xl overflow-hidden border border-slate-800/60 bg-slate-950/90 shadow-inner" id="leaflet-map-wrapper">
-        <style>{`
-          .leaflet-tile {
-            filter: brightness(0.9) contrast(1.15) saturate(0.95);
-            transition: opacity 0.5s ease-in-out;
-          }
-          .leaflet-container {
-            background: #020617 !important;
-          }
-          /* Smooth animations for zooming and panning */
-          .leaflet-zoom-animated {
-            transition: transform 0.55s cubic-bezier(0.25, 1, 0.5, 1) !important;
-          }
-          /* Custom styled Leaflet zoom buttons for elite glassmorphism */
-          .leaflet-bar {
-            border: 1px solid rgba(99, 102, 241, 0.2) !important;
-            box-shadow: 0 4px 14px rgba(0, 0, 0, 0.6) !important;
-            border-radius: 8px !important;
-            overflow: hidden;
-            backdrop-filter: blur(8px);
-          }
-          .leaflet-bar a {
-            background-color: rgba(15, 23, 42, 0.85) !important;
-            color: #94a3b8 !important;
-            border-bottom: 1px solid rgba(99, 102, 241, 0.1) !important;
-            transition: all 0.2s ease;
-          }
-          .leaflet-bar a:hover {
-            background-color: rgba(99, 102, 241, 0.3) !important;
-            color: #ffffff !important;
-          }
-        `}</style>
-
-        <MapContainer
-          center={DEFAULT_CENTER}
-          zoom={3}
-          style={{ height: '100%', width: '100%' }}
-          minZoom={3}
-          maxZoom={12}
-          zoomControl={true}
-          attributionControl={false}
-          maxBounds={[[-85, -180], [85, 180]]}
-          maxBoundsViscosity={1.0}
-          className="z-10"
-        >
-          {/* Conditional rendering of map themes */}
-          {mapTheme === 'dark' ? (
-            <>
-              <TileLayer
-                key="dark-base"
-                url="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}"
-                attribution='&copy; Esri, HERE, Garmin, NGA, USGS'
-                keepBuffer={2}
-                updateWhenIdle={true}
-                updateWhenZooming={false}
-              />
-              <TileLayer
-                key="dark-reference"
-                url="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}"
-                attribution='&copy; Esri, HERE, Garmin, NGA, USGS'
-                keepBuffer={2}
-                updateWhenIdle={true}
-                updateWhenZooming={false}
-              />
-            </>
-          ) : (
-            <>
-              <TileLayer
-                key="satellite-base"
-                url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-                attribution='&copy; Esri, Maxar, Earthstar Geographics, USDA FSA, USGS'
-                keepBuffer={2}
-                updateWhenIdle={true}
-                updateWhenZooming={false}
-              />
-              <TileLayer
-                key="satellite-reference"
-                url="https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}"
-                attribution='&copy; Esri, HERE, Garmin, NGA, USGS'
-                keepBuffer={2}
-                updateWhenIdle={true}
-                updateWhenZooming={false}
-              />
-            </>
-          )}
-
-          {/* Click observer to update parent state */}
-          <MapEventsHandler onMapClick={handleMapClick} />
-          
-          {/* Zoom/Pan animation controller */}
-          <MapViewController flyToCoords={flyToCoords} />
-
-          {/* Map view center tracker with auto-unlock interaction trigger */}
-          <CenterTracker setViewCenter={setViewCenter} onUserInteraction={() => setCameraLocked(false)} />
-
-          {/* Future orbital path of the ISS (glowing trailing line) */}
-          {iss && futurePathSegments && futurePathSegments.map((segment, idx) => {
-            if (!segment) return null;
-            const validSegment = segment.filter(pt => 
-              Array.isArray(pt) && 
-              pt.length === 2 && 
-              typeof pt[0] === 'number' && 
-              typeof pt[1] === 'number' && 
-              !isNaN(pt[0]) && 
-              !isNaN(pt[1]) && 
-              isFinite(pt[0]) && 
-              isFinite(pt[1])
-            );
-            if (validSegment.length < 2) return null;
-
-            return [
-              /* Outer core glow (thick, semi-transparent red) */
-              <Polyline
-                key={`iss-path-glow-outer-${idx}`}
-                positions={validSegment}
-                pathOptions={{
-                  color: '#f87171',
-                  weight: 6,
-                  opacity: 0.35,
-                  lineCap: 'round',
-                  lineJoin: 'round',
-                }}
-              />,
-              /* Inner bright core (thin, high contrast dashed white-pink) */
-              <Polyline
-                key={`iss-path-glow-inner-${idx}`}
-                positions={validSegment}
-                pathOptions={{
-                  color: '#ffffff',
-                  weight: 2,
-                  opacity: 0.9,
-                  lineCap: 'round',
-                  lineJoin: 'round',
-                  dashArray: '6, 6',
-                }}
-              />
-            ];
-          })}
-
-          {/* Future orbital path of selected Satellite (glowing trailing line) */}
-          {selectedObjectId && selectedObjectId !== 'iss' && satellitePathSegments && satellitePathSegments.map((segment, idx) => {
-            if (!segment) return null;
-            const validSegment = segment.filter(pt => 
-              Array.isArray(pt) && 
-              pt.length === 2 && 
-              typeof pt[0] === 'number' && 
-              typeof pt[1] === 'number' && 
-              !isNaN(pt[0]) && 
-              !isNaN(pt[1]) && 
-              isFinite(pt[0]) && 
-              isFinite(pt[1])
-            );
-            if (validSegment.length < 2) return null;
-
-            const selectedSat = satellites.find(s => s.id === selectedObjectId);
-            const satColor = selectedSat?.color || '#10b981';
-
-            return [
-              /* Outer core glow (thick, semi-transparent satellite color) */
-              <Polyline
-                key={`sat-path-glow-outer-${idx}`}
-                positions={validSegment}
-                pathOptions={{
-                  color: satColor,
-                  weight: 6,
-                  opacity: 0.35,
-                  lineCap: 'round',
-                  lineJoin: 'round',
-                }}
-              />,
-              /* Inner bright core (thin, high contrast dashed white-color) */
-              <Polyline
-                key={`sat-path-glow-inner-${idx}`}
-                positions={validSegment}
-                pathOptions={{
-                  color: '#ffffff',
-                  weight: 1.8,
-                  opacity: 0.9,
-                  lineCap: 'round',
-                  lineJoin: 'round',
-                  dashArray: '5, 5',
-                }}
-              />
-            ];
-          })}
-
-          {/* Observer Station Marker */}
-          {observer && typeof observer.latitude === 'number' && typeof observer.longitude === 'number' && !isNaN(observer.latitude) && !isNaN(observer.longitude) && (
-            <Marker position={[observer.latitude, observer.longitude]} icon={observerIcon}>
-              <Popup className="custom-leaflet-popup">
-                <div className="p-1 text-slate-100 font-mono text-xs">
-                  <p className="font-bold border-b border-slate-800 pb-1 text-indigo-400">ACTIVE OBS STATION</p>
-                  <p className="mt-1 font-sans">{observer.name}</p>
-                  <p className="mt-1 font-bold">LAT: {observer.latitude.toFixed(4)}°</p>
-                  <p>LNG: {observer.longitude.toFixed(4)}°</p>
-                </div>
-              </Popup>
-            </Marker>
-          )}
-
-          {/* Orbiting ISS satellite marker */}
-          {iss && (
-            (() => {
-              const pos = animatedCoords || (iss.coordinates ? [iss.coordinates.latitude, iss.coordinates.longitude] : null);
-              if (pos && typeof pos[0] === 'number' && typeof pos[1] === 'number' && !isNaN(pos[0]) && !isNaN(pos[1])) {
-                const isSelected = selectedObjectId === 'iss';
-                return (
-                  <React.Fragment>
-                    <Marker position={pos as [number, number]} icon={issIcon}>
-                      <Popup>
-                        <div className="p-1 text-slate-100 font-mono text-xs">
-                          <p className="font-bold border-b border-red-900 pb-1 text-red-100 uppercase">ISS (SPACE STATION)</p>
-                          <p className="mt-1 font-sans">{iss.description}</p>
-                          <p className="mt-1">LAT: {pos[0].toFixed(4)}°</p>
-                          <p>LNG: {pos[1].toFixed(4)}°</p>
-                        </div>
-                      </Popup>
-                    </Marker>
-                    {isSelected && (
-                      <Circle
-                        center={pos as [number, number]}
-                        radius={2200000} // ~2200 km footprint radius
-                        pathOptions={{
-                          color: '#ef4444',
-                          fillColor: '#ef4444',
-                          fillOpacity: 0.04,
-                          weight: 1,
-                          dashArray: '4, 8'
-                        }}
-                      />
-                    )}
-                  </React.Fragment>
-                );
+      {/* Full-width, responsive container */}
+      <div className="relative flex-1 min-h-[300px] w-full rounded-xl overflow-hidden border border-slate-800/60 bg-slate-950/90 shadow-inner flex items-center justify-center" id="globe-viewport-wrapper">
+        <div className="relative w-full h-full" id="leaflet-map-wrapper">
+            <style>{`
+              .leaflet-tile {
+                filter: brightness(0.9) contrast(1.15) saturate(0.95);
+                transition: opacity 0.5s ease-in-out;
               }
-              return null;
-            })()
-          )}
+              .leaflet-container {
+                background: #020617 !important;
+              }
+              /* Smooth animations for zooming and panning */
+              .leaflet-zoom-animated {
+                transition: transform 0.2s cubic-bezier(0.25, 1, 0.5, 1) !important;
+              }
+              /* Custom styled Leaflet zoom buttons for elite glassmorphism */
+              .leaflet-bar {
+                border: 1px solid rgba(99, 102, 241, 0.2) !important;
+                box-shadow: 0 4px 14px rgba(0, 0, 0, 0.6) !important;
+                border-radius: 8px !important;
+                overflow: hidden;
+                backdrop-filter: blur(8px);
+              }
+              .leaflet-bar a {
+                background-color: rgba(15, 23, 42, 0.85) !important;
+                color: #94a3b8 !important;
+                border-bottom: 1px solid rgba(99, 102, 241, 0.1) !important;
+                transition: all 0.2s ease;
+              }
+              .leaflet-bar a:hover {
+                background-color: rgba(99, 102, 241, 0.3) !important;
+                color: #ffffff !important;
+              }
+              /* Custom styled Leaflet popups for premium dark theme contrast */
+              .leaflet-popup-content-wrapper {
+                background: rgba(15, 23, 42, 0.95) !important;
+                color: #f1f5f9 !important;
+                border: 1px solid rgba(99, 102, 241, 0.25) !important;
+                box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.7), 0 8px 10px -6px rgba(0, 0, 0, 0.7) !important;
+                border-radius: 10px !important;
+                backdrop-filter: blur(8px);
+              }
+              .leaflet-popup-tip {
+                background: rgba(15, 23, 42, 0.95) !important;
+                border-left: 1px solid rgba(99, 102, 241, 0.25) !important;
+                border-bottom: 1px solid rgba(99, 102, 241, 0.25) !important;
+                box-shadow: none !important;
+              }
+              .leaflet-popup-close-button {
+                color: #94a3b8 !important;
+                font-weight: bold;
+                padding: 4px 6px 0 0 !important;
+              }
+              .leaflet-popup-close-button:hover {
+                color: #ffffff !important;
+                background: transparent !important;
+              }
+            `}</style>
 
-          {/* General orbiting instruments */}
-          {satellites.map((sat) => {
-            const lat = sat.coordinates ? sat.coordinates.latitude : sat.latitude;
-            const lng = sat.coordinates ? sat.coordinates.longitude : sat.longitude;
+            <MapContainer
+              center={DEFAULT_CENTER}
+              zoom={3}
+              style={{ height: '100%', width: '100%' }}
+              minZoom={3}
+              maxZoom={12}
+              zoomControl={true}
+              attributionControl={false}
+              maxBounds={[[-85, -180], [85, 180]]}
+              maxBoundsViscosity={1.0}
+              className="z-10"
+            >
+              {/* Conditional rendering of map themes */}
+              {mapTheme === 'dark' ? (
+                <>
+                  <TileLayer
+                    key="dark-base"
+                    url="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}"
+                    attribution='&copy; Esri, HERE, Garmin, NGA, USGS'
+                    keepBuffer={2}
+                    updateWhenIdle={true}
+                    updateWhenZooming={false}
+                  />
+                  <TileLayer
+                    key="dark-reference"
+                    url="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}"
+                    attribution='&copy; Esri, HERE, Garmin, NGA, USGS'
+                    keepBuffer={2}
+                    updateWhenIdle={true}
+                    updateWhenZooming={false}
+                  />
+                </>
+              ) : (
+                <>
+                  <TileLayer
+                    key="satellite-base"
+                    url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+                    attribution='&copy; Esri, Maxar, Earthstar Geographics, USDA FSA, USGS'
+                    keepBuffer={2}
+                    updateWhenIdle={true}
+                    updateWhenZooming={false}
+                  />
+                  <TileLayer
+                    key="satellite-reference"
+                    url="https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}"
+                    attribution='&copy; Esri, HERE, Garmin, NGA, USGS'
+                    keepBuffer={2}
+                    updateWhenIdle={true}
+                    updateWhenZooming={false}
+                  />
+                </>
+              )}
+
+              {/* Click observer to update parent state */}
+              <MapEventsHandler onMapClick={handleMapClick} />
+              
+              {/* Zoom/Pan animation controller */}
+              <MapViewController flyToCoords={flyToCoords} timeMultiplier={timeMultiplier} cameraLocked={cameraLocked} programmaticFlyRef={programmaticFlyRef} />
+
+              {/* Map view center tracker with auto-unlock interaction trigger */}
+              <CenterTracker setViewCenter={setViewCenter} onUserInteraction={() => setCameraLocked(false)} programmaticFlyRef={programmaticFlyRef} />
+
+              {/* Future orbital path of the ISS (glowing trailing line) */}
+              {iss && futurePathSegments && futurePathSegments.map((segment, idx) => {
+                if (!segment) return null;
+                const validSegment = segment.filter(pt => 
+                  Array.isArray(pt) && 
+                  pt.length === 2 && 
+                  typeof pt[0] === 'number' && 
+                  typeof pt[1] === 'number' && 
+                  !isNaN(pt[0]) && 
+                  !isNaN(pt[1]) && 
+                  isFinite(pt[0]) && 
+                  isFinite(pt[1])
+                );
+                if (validSegment.length < 2) return null;
+
+                return [
+                  /* Outer core glow (thick, semi-transparent red) */
+                  <Polyline
+                    key={`iss-path-glow-outer-${idx}`}
+                    positions={validSegment}
+                    pathOptions={{
+                      color: '#f87171',
+                      weight: 6,
+                      opacity: 0.35,
+                      lineCap: 'round',
+                      lineJoin: 'round',
+                    }}
+                  />,
+                  /* Inner bright core (thin, high contrast dashed white-pink) */
+                  <Polyline
+                    key={`iss-path-glow-inner-${idx}`}
+                    positions={validSegment}
+                    pathOptions={{
+                      color: '#ffffff',
+                      weight: 2,
+                      opacity: 0.9,
+                      lineCap: 'round',
+                      lineJoin: 'round',
+                      dashArray: '6, 6',
+                    }}
+                  />
+                ];
+              })}
+
+              {/* Future orbital path of selected Satellite (glowing trailing line) */}
+              {selectedObjectId && selectedObjectId !== 'iss' && satellitePathSegments && satellitePathSegments.map((segment, idx) => {
+                if (!segment) return null;
+                const validSegment = segment.filter(pt => 
+                  Array.isArray(pt) && 
+                  pt.length === 2 && 
+                  typeof pt[0] === 'number' && 
+                  typeof pt[1] === 'number' && 
+                  !isNaN(pt[0]) && 
+                  !isNaN(pt[1]) && 
+                  isFinite(pt[0]) && 
+                  isFinite(pt[1])
+                );
+                if (validSegment.length < 2) return null;
+
+                const selectedSat = satellites.find(s => s.id === selectedObjectId);
+                const satColor = selectedSat?.color || '#10b981';
+
+                return [
+                  /* Outer core glow (thick, semi-transparent satellite color) */
+                  <Polyline
+                    key={`sat-path-glow-outer-${idx}`}
+                    positions={validSegment}
+                    pathOptions={{
+                      color: satColor,
+                      weight: 6,
+                      opacity: 0.35,
+                      lineCap: 'round',
+                      lineJoin: 'round',
+                    }}
+                  />,
+                  /* Inner bright core (thin, high contrast dashed white-color) */
+                  <Polyline
+                    key={`sat-path-glow-inner-${idx}`}
+                    positions={validSegment}
+                    pathOptions={{
+                      color: '#ffffff',
+                      weight: 1.8,
+                      opacity: 0.9,
+                      lineCap: 'round',
+                      lineJoin: 'round',
+                      dashArray: '5, 5',
+                    }}
+                  />
+                ];
+              })}
+
+              {/* Observer Station Marker */}
+              {observer && typeof observer.latitude === 'number' && typeof observer.longitude === 'number' && !isNaN(observer.latitude) && !isNaN(observer.longitude) && (
+                <Marker position={[observer.latitude, observer.longitude]} icon={observerIcon}>
+                  <Popup className="custom-leaflet-popup">
+                    <div className="p-1 text-slate-100 font-mono text-xs">
+                      <p className="font-bold border-b border-slate-800 pb-1 text-indigo-400">ACTIVE OBS STATION</p>
+                      <p className="mt-1 font-sans">{observer.name}</p>
+                      <p className="mt-1 font-bold">LAT: {observer.latitude.toFixed(4)}°</p>
+                      <p>LNG: {observer.longitude.toFixed(4)}°</p>
+                    </div>
+                  </Popup>
+                </Marker>
+              )}
+
+              {/* Orbiting ISS satellite marker */}
+              {iss && (
+                (() => {
+                  const pos = iss.coordinates ? [iss.coordinates.latitude, iss.coordinates.longitude] as [number, number] : null;
+                  if (pos && typeof pos[0] === 'number' && typeof pos[1] === 'number' && !isNaN(pos[0]) && !isNaN(pos[1])) {
+                    const isSelected = selectedObjectId === 'iss';
+                    return (
+                      <React.Fragment>
+                        <Marker 
+                          position={pos as [number, number]} 
+                          icon={issIcon}
+                          bubblingMouseEvents={false}
+                          eventHandlers={{
+                            click: (e) => {
+                              if (e.originalEvent) {
+                                e.originalEvent.stopPropagation();
+                              }
+                              onSelectObject(iss);
+                            }
+                          }}
+                        >
+                          <Popup>
+                            <div className="p-1 text-slate-100 font-mono text-xs">
+                              <p className="font-bold border-b border-red-900 pb-1 text-red-100 uppercase">ISS (SPACE STATION)</p>
+                              <p className="mt-1 font-sans">{iss.description}</p>
+                              <p className="mt-1">LAT: {pos[0].toFixed(4)}°</p>
+                              <p>LNG: {pos[1].toFixed(4)}°</p>
+                            </div>
+                          </Popup>
+                        </Marker>
+                        {isSelected && (
+                          <Circle
+                            center={pos as [number, number]}
+                            radius={2200000} // ~2200 km footprint radius
+                            pathOptions={{
+                              color: '#ef4444',
+                              fillColor: '#ef4444',
+                              fillOpacity: 0.04,
+                              weight: 1,
+                              dashArray: '4, 8'
+                            }}
+                          />
+                        )}
+                      </React.Fragment>
+                    );
+                  }
+                  return null;
+                })()
+              )}
+
+              {/* General orbiting instruments */}
+              {satellites.map((sat) => {
+                const lat = sat.coordinates ? sat.coordinates.latitude : sat.latitude;
+                const lng = sat.coordinates ? sat.coordinates.longitude : sat.longitude;
+                
+                if (typeof lat === 'number' && typeof lng === 'number' && !isNaN(lat) && !isNaN(lng)) {
+                  const isSelected = selectedObjectId === sat.id;
+                  return (
+                    <React.Fragment key={sat.id}>
+                      <Marker 
+                        position={[lat, lng]} 
+                        icon={getSatIcon(sat.color)}
+                        bubblingMouseEvents={false}
+                        eventHandlers={{
+                          click: (e) => {
+                            if (e.originalEvent) {
+                              e.originalEvent.stopPropagation();
+                            }
+                            onSelectObject(sat);
+                          }
+                        }}
+                      >
+                        <Popup>
+                          <div className="p-1 text-slate-100 font-mono text-xs">
+                            <p className="font-bold border-b border-slate-800 pb-1 text-emerald-400 uppercase">{sat.name}</p>
+                            <p className="mt-1 font-sans">{sat.description}</p>
+                            <p className="mt-1">LAT: {lat.toFixed(4)}°</p>
+                            <p>LNG: {lng.toFixed(4)}°</p>
+                          </div>
+                        </Popup>
+                      </Marker>
+                      {isSelected && (
+                        <Circle
+                          center={[lat, lng]}
+                          radius={1800000} // ~1800 km footprint radius
+                          pathOptions={{
+                            color: sat.color || '#10b981',
+                            fillColor: sat.color || '#10b981',
+                            fillOpacity: 0.04,
+                            weight: 1,
+                            dashArray: '4, 8'
+                          }}
+                        />
+                      )}
+                    </React.Fragment>
+                  );
+                }
+                return null;
+              })}
+            </MapContainer>
             
-            if (typeof lat === 'number' && typeof lng === 'number' && !isNaN(lat) && !isNaN(lng)) {
-              const isSelected = selectedObjectId === sat.id;
-              return (
-                <React.Fragment key={sat.id}>
-                  <Marker 
-                    position={[lat, lng]} 
-                    icon={getSatIcon(sat.color)}
-                  >
-                    <Popup>
-                      <div className="p-1 text-slate-100 font-mono text-xs">
-                        <p className="font-bold border-b border-slate-800 pb-1 text-emerald-400 uppercase">{sat.name}</p>
-                        <p className="mt-1 font-sans">{sat.description}</p>
-                        <p className="mt-1">LAT: {lat.toFixed(4)}°</p>
-                        <p>LNG: {lng.toFixed(4)}°</p>
-                      </div>
-                    </Popup>
-                  </Marker>
-                  {isSelected && (
-                    <Circle
-                      center={[lat, lng]}
-                      radius={1800000} // ~1800 km footprint radius
-                      pathOptions={{
-                        color: sat.color || '#10b981',
-                        fillColor: sat.color || '#10b981',
-                        fillOpacity: 0.04,
-                        weight: 1,
-                        dashArray: '4, 8'
-                      }}
-                    />
-                  )}
-                </React.Fragment>
-              );
-            }
-            return null;
-          })}
-        </MapContainer>
-        
-        {/* Helper overlay showing instructions */}
-        <div className="absolute bottom-2 left-2 z-[1000] text-xs font-mono text-slate-400 bg-slate-950/80 px-2 py-1 rounded-md border border-slate-800/80 pointer-events-none uppercase">
-          Click map area to relocate Ground Station
-        </div>
+            {/* Helper overlay showing instructions */}
+            <div className="absolute bottom-2 left-2 z-[1000] text-xs font-mono text-slate-400 bg-slate-950/80 px-2 py-1 rounded-md border border-slate-800/80 pointer-events-none uppercase">
+              Click map area to relocate Ground Station
+            </div>
+          </div>
       </div>
 
       {/* Grid Coordinates Footer Info */}

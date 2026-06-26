@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Orbit, 
@@ -121,7 +121,7 @@ export default function ObjectPanel({
   });
 
   // Find currently selected object info
-  const selectedObject = 
+  const resolvedObject = 
     planets.find(p => p.id === selectedObjectId) || 
     satellites.find(s => s.id === selectedObjectId) || 
     (iss && selectedObjectId === 'iss' ? iss : null) ||
@@ -141,6 +141,12 @@ export default function ObjectPanel({
       }
       return null;
     })();
+
+  const lastActiveObjectRef = useRef<CelestialObject | null>(null);
+  if (resolvedObject) {
+    lastActiveObjectRef.current = resolvedObject;
+  }
+  const selectedObject = selectedObjectId ? (resolvedObject || lastActiveObjectRef.current) : null;
 
   // Helper to parse compass/cardinal bearing
   const getCardinalDirection = (az: number) => {

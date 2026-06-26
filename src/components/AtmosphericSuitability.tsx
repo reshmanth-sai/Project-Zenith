@@ -78,13 +78,13 @@ export default function AtmosphericSuitability({ bortleScale, temperature, humid
 
   return (
     <div className="bg-slate-950/60 border border-slate-900 rounded-xl p-5 shadow-2xl font-mono backdrop-blur-md" id="suitability-section">
-      <span className="text-slate-500 text-xs font-bold block tracking-wider uppercase mb-2.5 flex items-center justify-between">
+      <span className="text-slate-500 text-xs font-bold block tracking-wider uppercase mb-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-1.5">
         <span className="flex items-center gap-1">
           <Gauge className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
-          ATMOSPHERIC SUITABILITY INDEX
+          ATMOSPHERIC SUITABILITY
           <InfoTooltip content="Observatory conditions forecast assessing seeing quality, Bortle scale glare, limiting magnitude, and sky transparency." />
         </span>
-        <span className={`px-1.5 py-0.5 rounded text-xs font-extrabold uppercase border ${transColor}`}>
+        <span className={`px-1.5 py-0.5 rounded text-[10px] sm:text-xs font-extrabold uppercase border w-fit ${transColor}`}>
           SUITABILITY: {transText} ({transparencyScore}%)
         </span>
       </span>

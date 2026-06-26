@@ -46,6 +46,48 @@ const DEFAULT_LOGS: ObsLog[] = [
   }
 ];
 
+function calculateSatelliteAltAz(
+  obsLat: number,
+  obsLng: number,
+  satLat: number,
+  satLng: number,
+  satAltKm: number
+) {
+  const rEarth = 6371;
+  const rObs = rEarth;
+  const rSat = rEarth + satAltKm;
+  
+  const lat1Rad = (obsLat * Math.PI) / 180;
+  const lng1Rad = (obsLng * Math.PI) / 180;
+  const lat2Rad = (satLat * Math.PI) / 180;
+  const lng2Rad = (satLng * Math.PI) / 180;
+  
+  const cosTheta = Math.sin(lat1Rad) * Math.sin(lat2Rad) + 
+                    Math.cos(lat1Rad) * Math.cos(lat2Rad) * Math.cos(lng2Rad - lng1Rad);
+  const theta = Math.acos(Math.max(-1, Math.min(1, cosTheta)));
+  
+  const y = Math.sin(lng2Rad - lng1Rad) * Math.cos(lat2Rad);
+  const x = Math.cos(lat1Rad) * Math.sin(lat2Rad) - Math.sin(lat1Rad) * Math.cos(lat2Rad) * Math.cos(lng2Rad - lng1Rad);
+  
+  let bearingRad = Math.atan2(y, x);
+  if (bearingRad < 0) bearingRad += 2 * Math.PI;
+  const azimuth = (bearingRad * 180) / Math.PI;
+  
+  const dSq = rObs * rObs + rSat * rSat - 2 * rObs * rSat * cosTheta;
+  const d = Math.sqrt(dSq);
+  
+  const numElev = rSat * cosTheta - rObs;
+  const denElev = rSat * Math.sin(theta);
+  const elevRad = Math.atan2(numElev, Math.max(0.0001, denElev));
+  const altitude = (elevRad * 180) / Math.PI;
+  
+  return {
+    altitude: parseFloat(altitude.toFixed(2)),
+    azimuth: parseFloat(azimuth.toFixed(2)),
+    rangeKm: parseFloat(d.toFixed(1))
+  };
+}
+
 export default function App() {
   const { globalObserverLocation, setGlobalObserverLocation } = useObserver();
 
@@ -208,17 +250,13 @@ export default function App() {
   useEffect(() => {
     if (timeMultiplier === 0) return; // Paused
 
-    if (timeMultiplier === 300) {
-      // Warp time-travel mode: add 10 minutes (10 * 60 * 1000) every 1 real-time second (1000 ms)
-      timerRef.current = setInterval(() => {
-        setCurrentTime((prev) => prev + 10 * 60 * 1000);
-      }, 1000);
-    } else {
-      // Standard playback mode (Fast / Real-time)
-      timerRef.current = setInterval(() => {
-        setCurrentTime((prev) => prev + (200 * timeMultiplier));
-      }, 200);
-    }
+    const intervalMs = 50; // Update 20 times per second for smooth gliding
+    const multiplier = timeMultiplier === 300 ? 600 : timeMultiplier;
+    const stepMs = intervalMs * multiplier;
+
+    timerRef.current = setInterval(() => {
+      setCurrentTime((prev) => prev + stepMs);
+    }, intervalMs);
 
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
@@ -227,9 +265,9 @@ export default function App() {
 
   // Main telemetry fetching mechanism
   useEffect(() => {
-    // High performance mode: if time is moving fast (Fast or Warp), compute positions locally
-    // in 60fps instead of saturating the network with repetitive back-to-back requests.
-    if (timeMultiplier > 1) {
+    // High performance mode: if time is running, compute positions locally
+    // in 20fps instead of saturating the network with repetitive back-to-back requests.
+    if (timeMultiplier !== 0) {
       executeLocalBackupTelemetry(activeTime);
       return;
     }
@@ -292,43 +330,10 @@ export default function App() {
 
   // Real-time ISS tracking background poll mechanism (triggered every 5 seconds)
   useEffect(() => {
-    // Only poll in standard real-time mode to prevent fighting with warp / custom simulation times
-    if (timeMultiplier !== 1) return;
-    let active = true;
-    const pollISS = async () => {
-      try {
-        const queryParams = `?t=${currentTime}&lat=${observer.latitude}&lng=${observer.longitude}`;
-        const res = await fetch(`/api/iss${queryParams}`);
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const issData = await res.json();
-        
-        if (!active) return;
-        
-        if (issData) {
-          setIss(issData);
-          
-          // Align current details panel selection if ISS is focused
-          setSelectedObject(prev => {
-            if (prev && prev.id === 'iss') {
-              return issData;
-            }
-            return prev;
-          });
-        }
-      } catch (err) {
-        console.log("[ISS Background Poll] Live position fetching error, utilizing current mathematical calculations state.");
-      }
-    };
-
-    // Execute immediately on observer change
-    pollISS();
-
-    const interval = setInterval(pollISS, 5000);
-    return () => {
-      active = false;
-      clearInterval(interval);
-    };
-  }, [observer.latitude, observer.longitude, timeMultiplier, currentTime]);
+    // Disabled background poll during time ticks to prevent duplicate server queries, network flooding,
+    // and telemetry state conflicts. Client-side SGP4 recalculations handle this cleanly at 20fps.
+    return;
+  }, []);
 
   // Client-side math calculators as a bulletproof loading backup
   const executeLocalBackupTelemetry = (time: number = activeTime) => {
@@ -348,13 +353,13 @@ export default function App() {
 
     // ISS Orbit tracking
     const issPos = getIssPositionAtTime(time);
-
-    const issDistanceKmSq = Math.pow(observer.latitude - issPos.latitude, 2) + Math.pow(observer.longitude - issPos.longitude, 2);
-    const isNearby = issDistanceKmSq < 900; // Close overhead
-
-    const issAltAz = isNearby 
-      ? { altitude: 45, azimuth: 180, rangeKm: 512 } 
-      : { altitude: -12, azimuth: 270, rangeKm: 4200 };
+    const issAltAz = calculateSatelliteAltAz(
+      observer.latitude,
+      observer.longitude,
+      issPos.latitude,
+      issPos.longitude,
+      issPos.altitude || 418.5
+    );
 
     const mockIss: CelestialObject = {
       id: "iss",
@@ -366,34 +371,45 @@ export default function App() {
       localCoordinates: issAltAz,
       description: "Joint human orbital structure flying at 418km height.",
       magnitude: -2.0,
+      inclination: 51.64,
+      period: 5560,
+      altitude: 418.5
     };
 
     setIss(mockIss);
 
     // Mock Satellites
     const mockSats = [
-      { id: "mangalyaan", name: "Mangalyaan (Mars Orbiter)", color: "#f87171", lat: 10, lng: -45, magnitude: 3.8, description: "India's landmark Mars Orbiter Mission (MOM)." },
-      { id: "aditya-l1", name: "Aditya-L1 Solar Probe", color: "#fbbf24", lat: -15, lng: 30, magnitude: 4.2, description: "India's first space-based observatory probing solar wind." },
-      { id: "cartosat-3", name: "Cartosat-3", color: "#38bdf8", lat: 45, lng: 110, magnitude: 2.5, description: "Advanced Indian earth observation satellite carrying high-precision optical mapping sensors." },
-      { id: "aryabhata", name: "Aryabhata", color: "#ae78ff", lat: 25, lng: 75, magnitude: 4.5, description: "India's historic first satellite launched in 1975." },
-      { id: "hst", name: "Hubble Space Telescope", color: "#93C5FD", lat: 20, lng: -140, magnitude: 1.5, description: "Fabulous cosmic observatory orbiting Earth since 1990." },
-      { id: "starlink-1", name: "Starlink Tracker-A", color: "#A7F3D0", lat: 51, lng: -10, magnitude: 2.8, description: "SpaceX telecommunication satellite constellation component." },
-      { id: "starlink-2", name: "Starlink Tracker-B", color: "#A7F3D0", lat: 51.5, lng: -12, magnitude: 3.0, description: "SpaceX telecommunication satellite constellation component." },
-      { id: "noaa-19", name: "NOAA-19 Weather", color: "#FDE68A", lat: -35, lng: 120, magnitude: 3.5, description: "Polar-orbiting environmental weather tracking satellite." },
-      { id: "envisat", name: "Envisat Spacecraft", color: "#F3A7F2", lat: -60, lng: 15, magnitude: 2.1, description: "Large active research spacecraft monitoring climate change parameters." },
-      { id: "tiangong", name: "Tiangong Space Station", color: "#f43f5e", lat: 39, lng: 116, magnitude: 1.5, description: "China's multi-module space station in low Earth orbit, active since 2021." },
-      { id: "jwst", name: "James Webb Telescope", color: "#fb7185", lat: -2, lng: -60, magnitude: 5.5, description: "NASA/ESA/CSA premier infrared cosmic observatory." },
-      { id: "iridium-180", name: "Iridium-180 Link", color: "#eab308", lat: 70, lng: -80, magnitude: 2.9, description: "Active communications satellite in low Earth orbit." },
-      { id: "aqua", name: "Aqua satellite", color: "#22c55e", lat: -50, lng: -120, magnitude: 3.2, description: "NASA scientific research satellite tracking global water cycles." },
-      { id: "terra", name: "Terra satellite", color: "#10b981", lat: 35, lng: -100, magnitude: 3.1, description: "NASA flagship Earth observation satellite monitoring land cover." },
-      { id: "meteosat-11", name: "Meteosat-11", color: "#06b6d4", lat: 0, lng: 0, magnitude: 4.8, description: "EUMETSAT high-orbit weather satellite providing continuous scans." }
+      { id: "mangalyaan", name: "Mangalyaan (Mars Orbiter)", color: "#f87171", lat: 10, lng: -45, magnitude: 3.8, description: "India's landmark Mars Orbiter Mission (MOM).", inclination: 19.2, period: 5520, altitude: 430 },
+      { id: "aditya-l1", name: "Aditya-L1 Solar Probe", color: "#fbbf24", lat: -15, lng: 30, magnitude: 4.2, description: "India's first space-based observatory probing solar wind.", inclination: 7.3, period: 6100, altitude: 950 },
+      { id: "cartosat-3", name: "Cartosat-3", color: "#38bdf8", lat: 45, lng: 110, magnitude: 2.5, description: "Advanced Indian earth observation satellite carrying high-precision optical mapping sensors.", inclination: 97.9, period: 5820, altitude: 509 },
+      { id: "aryabhata", name: "Aryabhata", color: "#ae78ff", lat: 25, lng: 75, magnitude: 4.5, description: "India's historic first satellite launched in 1975.", inclination: 50.7, period: 5780, altitude: 560 },
+      { id: "hst", name: "Hubble Space Telescope", color: "#93C5FD", lat: 20, lng: -140, magnitude: 1.5, description: "Fabulous cosmic observatory orbiting Earth since 1990.", inclination: 28.47, period: 5760, altitude: 540 },
+      { id: "starlink-1", name: "Starlink Tracker-A", color: "#A7F3D0", lat: 51, lng: -10, magnitude: 2.8, description: "SpaceX telecommunication satellite constellation component.", inclination: 53.0, period: 5400, altitude: 550 },
+      { id: "starlink-2", name: "Starlink Tracker-B", color: "#A7F3D0", lat: 51.5, lng: -12, magnitude: 3.0, description: "SpaceX telecommunication satellite constellation component.", inclination: 53.0, period: 5400, altitude: 545 },
+      { id: "noaa-19", name: "NOAA-19 Weather", color: "#FDE68A", lat: -35, lng: 120, magnitude: 3.5, description: "Polar-orbiting environmental weather tracking satellite.", inclination: 99.2, period: 5940, altitude: 860 },
+      { id: "envisat", name: "Envisat Spacecraft", color: "#F3A7F2", lat: -60, lng: 15, magnitude: 2.1, description: "Large active research spacecraft monitoring climate change parameters.", inclination: 98.54, period: 6000, altitude: 790 },
+      { id: "tiangong", name: "Tiangong Space Station", color: "#f43f5e", lat: 39, lng: 116, magnitude: 1.5, description: "China's multi-module space station in low Earth orbit, active since 2021.", inclination: 41.5, period: 5500, altitude: 389 },
+      { id: "jwst", name: "James Webb Telescope", color: "#fb7185", lat: -2, lng: -60, magnitude: 5.5, description: "NASA/ESA/CSA premier infrared cosmic observatory.", inclination: 39.0, period: 6300, altitude: 1500 },
+      { id: "iridium-180", name: "Iridium-180 Link", color: "#eab308", lat: 70, lng: -80, magnitude: 2.9, description: "Active communications satellite in low Earth orbit.", inclination: 86.4, period: 6010, altitude: 780 },
+      { id: "aqua", name: "Aqua satellite", color: "#22c55e", lat: -50, lng: -120, magnitude: 3.2, description: "NASA scientific research satellite tracking global water cycles.", inclination: 98.2, period: 5930, altitude: 705 },
+      { id: "terra", name: "Terra satellite", color: "#10b981", lat: 35, lng: -100, magnitude: 3.1, description: "NASA flagship Earth observation satellite monitoring land cover.", inclination: 98.3, period: 5940, altitude: 713 },
+      { id: "meteosat-11", name: "Meteosat-11", color: "#06b6d4", lat: 0, lng: 0, magnitude: 4.8, description: "EUMETSAT high-orbit weather satellite providing continuous scans.", inclination: 1.3, period: 5120, altitude: 3578 }
     ].map((s, idx) => {
       // Calculate dynamic positions based on a simple orbit calculation to make it smooth and realistic!
       const orbitalOffset = (time / 100000) * (idx + 1) * 0.2;
-      const inclinationRad = (s.id === 'meteosat-11' ? 1.3 : (s.id === 'tiangong' ? 41.5 : 53)) * Math.PI / 180;
+      const inclinationRad = s.inclination * Math.PI / 180;
       const angle = orbitalOffset + s.lat;
       const calcLat = Math.asin(Math.sin(inclinationRad) * Math.sin(angle)) * 180 / Math.PI;
       const calcLng = ((s.lng + (time / 300000) * 360) % 360) - 180;
+
+      const localCoords = calculateSatelliteAltAz(
+        observer.latitude,
+        observer.longitude,
+        calcLat,
+        calcLng,
+        s.altitude
+      );
 
       return {
         id: s.id,
@@ -402,22 +418,35 @@ export default function App() {
         color: s.color,
         size: s.id === 'tiangong' ? 6 : 4,
         coordinates: { latitude: parseFloat(calcLat.toFixed(4)), longitude: parseFloat(calcLng.toFixed(4)) },
-        localCoordinates: { altitude: calcLat > 0 ? 35 : -10, azimuth: 145, rangeKm: 850 },
+        localCoordinates: localCoords,
         description: s.description,
-        magnitude: s.magnitude
+        magnitude: s.magnitude,
+        inclination: s.inclination,
+        period: s.period,
+        altitude: s.altitude
       };
     });
 
     setSatellites(mockSats);
 
     // Set Selection
-    if (!selectedObject && !hasSetInitialSelectionRef.current) {
+    const latestSelectedId = selectedObjectIdRef.current;
+    let newSelectedObj: CelestialObject | null = null;
+    if (latestSelectedId === 'iss') {
+      newSelectedObj = mockIss;
+    } else if (latestSelectedId) {
+      newSelectedObj = mockSats.find(s => s.id === latestSelectedId) || 
+                       mockPlanets.find(p => p.id === latestSelectedId) || 
+                       null;
+    }
+
+    if (newSelectedObj) {
+      setSelectedObject(newSelectedObj);
+    } else if (!selectedObject && !hasSetInitialSelectionRef.current) {
       setSelectedObject(mockIss);
       selectedObjectIdRef.current = "iss";
-      hasSetInitialSelectionRef.current = true;
-    } else if (selectedObject) {
-      hasSetInitialSelectionRef.current = true;
     }
+    hasSetInitialSelectionRef.current = true;
   };
 
   const calculateLocalAltAz = (lat: number, lng: number, ra: number, dec: number, time: number) => {
@@ -455,10 +484,13 @@ export default function App() {
   };
 
   // Handles clicking any node on Star map, Globe, or Lists
-  const handleSelectObject = (obj: CelestialObject) => {
-    setSelectedObject(obj);
-    if (!obj) {
+  const handleSelectObject = (obj: CelestialObject | null) => {
+    if (obj && selectedObject && selectedObject.id === obj.id) {
+      setSelectedObject(null);
       selectedObjectIdRef.current = null;
+    } else {
+      setSelectedObject(obj);
+      selectedObjectIdRef.current = obj?.id || null;
     }
   };
 
@@ -481,32 +513,53 @@ export default function App() {
   return (
     <div className={`min-h-screen flex flex-col justify-between font-sans selection:bg-indigo-500/30 selection:text-white ${nightVision ? 'night-vision' : ''}`} id="zenith-app-root">
       {/* 1. Header Banner */}
-      <header className="border-b border-white/10 bg-slate-950/55 backdrop-blur-xl px-6 md:px-8 lg:px-12 py-3.5 sticky top-0 z-50 shadow-[inset_0_1px_1px_rgba(255,255,255,0.07),0_10px_30px_-10px_rgba(0,0,0,0.5)]">
-        <div className="max-w-[1920px] mx-auto w-full flex flex-col md:flex-row items-center justify-between gap-4">
-          <div className="flex items-center gap-4">
-            <div className="w-10 h-10 rounded-full border border-indigo-500/40 flex items-center justify-center bg-indigo-500/10 shadow-[0_0_15px_rgba(129,140,248,0.25)]">
-              <div className="w-4 h-4 rounded-full bg-indigo-400 shadow-[0_0_12px_rgba(129,140,248,0.8)] animate-pulse flex items-center justify-center">
-                <Orbit className="w-2.5 h-2.5 text-slate-950 animate-spin-slow" />
+      <header className="border-b border-white/10 bg-slate-950/55 backdrop-blur-xl px-4 md:px-8 py-3.5 md:py-4 sticky top-0 z-50 shadow-[inset_0_1px_1px_rgba(255,255,255,0.07),0_10px_30px_-10px_rgba(0,0,0,0.5)]">
+        <div className="max-w-[1920px] mx-auto w-full flex flex-col lg:flex-row items-center justify-between gap-3.5">
+          <div className="flex flex-col sm:flex-row items-center justify-between w-full lg:w-auto gap-4">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-full border border-indigo-500/30 flex items-center justify-center bg-indigo-500/10 shadow-[0_0_12px_rgba(129,140,248,0.2)] shrink-0">
+                <div className="w-5 h-5 rounded-full bg-indigo-400 shadow-[0_0_10px_rgba(129,140,248,0.8)] animate-pulse flex items-center justify-center">
+                  <Orbit className="w-3 h-3 text-slate-950 animate-spin-slow" />
+                </div>
+              </div>
+              <div className="flex flex-col">
+                <div className="flex items-center gap-1.5">
+                  <h1 className="text-lg md:text-xl font-serif tracking-[0.18em] text-slate-50 leading-none">ZENITH</h1>
+                  <span className="text-[10px] md:text-xs font-mono font-bold bg-indigo-950/80 text-indigo-400 border border-indigo-500/25 px-1.5 py-0.5 rounded uppercase leading-none">V1.4</span>
+                </div>
+                <p className="text-[10px] font-mono tracking-wider text-slate-500 uppercase mt-0.5 hidden sm:block">Horizontal Satellite & Planet Mapping Interface</p>
               </div>
             </div>
-            <div className="flex flex-col">
-              <div className="flex items-center gap-2">
-                <h1 className="text-xl font-serif tracking-widest text-slate-50">ZENITH</h1>
-                <span className="text-xs font-mono font-bold bg-indigo-950/80 text-indigo-400 border border-indigo-500/25 px-1.5 py-0.5 rounded uppercase">The Celestial Eye v1.4</span>
-              </div>
-              <p className="text-xs font-mono tracking-wider text-slate-500 uppercase mt-0.5">Horizontal Satellite & Planet Mapping Interface</p>
+
+            {/* Night Vision Toggle Group */}
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setNightVision(!nightVision)}
+                className={`flex items-center gap-1.5 border shadow-sm backdrop-blur-md rounded-xl py-2 px-3.5 transition-all duration-300 cursor-pointer active:scale-95 text-[11px] ${
+                  nightVision
+                    ? 'bg-red-950/50 border-red-500/50 text-red-400 shadow-[0_0_12px_rgba(239,68,68,0.25)] font-extrabold animate-pulse'
+                    : 'bg-white/[0.03] border-white/10 hover:border-white/20 text-slate-400 hover:text-slate-200'
+                }`}
+                id="night-vision-toggle-btn"
+                title="Toggle monochromatic deep red night vision mode for field observation"
+              >
+                <div className={`w-1.5 h-1.5 rounded-full ${nightVision ? 'bg-red-500 animate-ping' : 'bg-slate-500'}`} />
+                <span className="font-bold font-mono uppercase tracking-wider">NIGHT VISION</span>
+              </button>
             </div>
           </div>
 
           {/* Dark-Sky Alert when light pollution is high */}
           {bortleScale >= 5 && (
-            <div className="flex items-center gap-3 bg-amber-950/40 border border-amber-500/30 rounded-xl p-2 px-4 shadow-[0_0_12px_rgba(245,158,11,0.06)] animate-pulse" id="dark-sky-alert-prompt">
-              <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0 animate-bounce" />
-              <div className="flex flex-col text-left">
-                <span className="text-xs font-bold text-amber-400 font-mono tracking-wider uppercase leading-none">DARK-SKY ALERT</span>
-                <span className="text-xs text-amber-200 font-mono mt-1">
-                  High glare (Bortle Class {bortleScale}) detected! Relocate to pristine dark skies for optimal observation.
-                </span>
+            <div className="flex flex-col sm:flex-row items-center gap-3 bg-amber-950/40 border border-amber-500/30 rounded-xl p-2.5 px-4 shadow-[0_0_12px_rgba(245,158,11,0.06)] animate-pulse w-full lg:w-auto" id="dark-sky-alert-prompt">
+              <div className="flex items-center gap-2 w-full">
+                <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0 animate-bounce" />
+                <div className="flex flex-col text-left">
+                  <span className="text-[10px] font-bold text-amber-400 font-mono tracking-wider uppercase leading-none">DARK-SKY ALERT</span>
+                  <span className="text-[10px] text-amber-200 font-mono mt-0.5 leading-tight">
+                    High glare (Bortle Class {bortleScale}) detected! Relocate to pristine dark skies for optimal observation.
+                  </span>
+                </div>
               </div>
               <button
                 onClick={() => {
@@ -518,7 +571,7 @@ export default function App() {
                   });
                   setBortleScale(1);
                 }}
-                className="ml-2 p-1 px-2.5 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold font-mono text-xs uppercase tracking-wider cursor-pointer shadow-md transition-all active:scale-95 shrink-0"
+                className="w-full sm:w-auto p-1 px-2.5 rounded bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold font-mono text-[10px] uppercase tracking-wider cursor-pointer shadow-md transition-all active:scale-95 shrink-0"
               >
                 Shift Coordinates
               </button>
@@ -528,16 +581,16 @@ export default function App() {
           {/* Header Node Location and Fluctuating Signal Strength Indicator */}
           <div className="hidden lg:flex items-center gap-4 bg-white/[0.03] border border-white/10 shadow-[inset_0_1px_1px_rgba(255,255,255,0.04)] backdrop-blur-md rounded-xl p-2 px-4" id="header-signal-station">
             <div className="flex flex-col text-left">
-              <span className="text-xs font-semibold text-slate-500 font-mono block leading-none uppercase">NODE LOCATORS</span>
-              <span className="text-sm font-bold text-slate-300 mt-1 block font-mono">
+              <span className="text-[10px] font-bold text-slate-500 font-mono block leading-none uppercase tracking-wider">NODE LOCATORS</span>
+              <span className="text-xs md:text-sm font-bold text-indigo-300 mt-1 block font-mono">
                 {observer.latitude >= 0 ? '+' : ''}{observer.latitude.toFixed(4)}°N, {observer.longitude >= 0 ? '+' : ''}{observer.longitude.toFixed(4)}°E
               </span>
             </div>
             <div className="h-6 w-[1px] bg-slate-800/80" />
             <div className="flex items-center gap-2.5">
               <div className="flex flex-col text-right">
-                <span className="text-xs font-bold text-slate-500 font-mono block leading-none">TELEMETRY LINK</span>
-                <span className={`text-xs font-bold font-mono mt-1 block uppercase leading-none ${
+                <span className="text-[10px] font-bold text-slate-500 font-mono block leading-none tracking-wider">TELEMETRY LINK</span>
+                <span className={`text-[11px] font-bold font-mono mt-1 block uppercase leading-none ${
                   signalStrength > 60 ? 'text-emerald-400' : signalStrength > 30 ? 'text-amber-400' : 'text-red-400 animate-pulse'
                 }`}>
                   {signalStrength > 80 ? 'EXCELLENT' : signalStrength > 60 ? 'GOOD' : signalStrength > 30 ? 'FAIR' : 'MARGINAL'} ({signalStrength}%)
@@ -546,87 +599,57 @@ export default function App() {
               <div className="flex items-end gap-[3px] h-3.5" title={`Signal strength: ${signalStrength}%`}>
                 {[1, 2, 3, 4, 5].map((bar) => (
                   <div
-                    key={bar}
-                    className={`w-[3px] rounded-t-sm transition-all duration-300 ${
-                      bar <= barsActive 
-                        ? (signalStrength > 60 ? 'bg-emerald-400 shadow-[0_0_4px_rgba(52,211,153,0.4)]' : signalStrength > 30 ? 'bg-amber-400' : 'bg-red-500 animate-pulse') 
-                        : 'bg-slate-800/80'
-                    }`}
-                    style={{ height: `${bar * 20}%` }}
-                  />
+                     key={bar}
+                     className={`w-[3px] rounded-t-sm transition-all duration-300 ${
+                       bar <= barsActive 
+                         ? (signalStrength > 60 ? 'bg-emerald-400 shadow-[0_0_4px_rgba(52,211,153,0.4)]' : signalStrength > 30 ? 'bg-amber-400' : 'bg-red-500 animate-pulse') 
+                         : 'bg-slate-800/80'
+                     }`}
+                     style={{ height: `${bar * 20}%` }}
+                   />
                 ))}
               </div>
             </div>
           </div>
 
-          {/* Night Vision Mode Toggle */}
-          <button
-            onClick={() => setNightVision(!nightVision)}
-            className={`flex items-center gap-2 border shadow-sm backdrop-blur-md rounded-xl p-2.5 px-4 transition-all duration-300 cursor-pointer active:scale-95 ${
-              nightVision
-                ? 'bg-red-950/50 border-red-500/50 text-red-400 shadow-[0_0_12px_rgba(239,68,68,0.25)] font-extrabold animate-pulse'
-                : 'bg-white/[0.03] border-white/10 hover:border-white/20 text-slate-400 hover:text-slate-200'
-            }`}
-            id="night-vision-toggle-btn"
-            title="Toggle monochromatic deep red night vision mode for field observation"
-          >
-            <div className={`w-2 h-2 rounded-full ${nightVision ? 'bg-red-500 animate-ping' : 'bg-slate-500'}`} />
-            <span className="text-xs font-bold font-mono uppercase tracking-wider">NIGHT VISION: {nightVision ? 'ON' : 'OFF'}</span>
-          </button>
-
-          {/* Audio Synthesizer Radar Sound Toggle */}
-          <button
-            onClick={() => setSoundEnabled(!soundEnabled)}
-            className={`flex items-center gap-2 border shadow-sm backdrop-blur-md rounded-xl p-2.5 px-4 transition-all duration-300 cursor-pointer active:scale-95 ${
-              soundEnabled
-                ? 'bg-indigo-950/50 border-indigo-500/50 text-indigo-400 shadow-[0_0_12px_rgba(99,102,241,0.25)] font-bold animate-pulse'
-                : 'bg-white/[0.03] border-white/10 hover:border-white/20 text-slate-400 hover:text-slate-200'
-            }`}
-            id="synth-sound-toggle-btn"
-            title="Toggle synthesizer acoustics for radar locks and horizon visibility transits"
-          >
-            {soundEnabled ? <Volume2 className="w-3.5 h-3.5 text-indigo-400" /> : <VolumeX className="w-3.5 h-3.5 text-slate-500" />}
-            <span className="text-xs font-bold font-mono uppercase tracking-wider">SOUND: {soundEnabled ? 'ACTIVE' : 'MUTED'}</span>
-          </button>
-
           {/* Calendar Clock & Warp Speed Rig */}
-          <div className="flex items-center gap-4 bg-white/[0.03] border border-white/10 shadow-[inset_0_1px_1px_rgba(255,255,255,0.04)] backdrop-blur-md rounded-xl p-2 px-4" id="simulator-chronostat">
-            <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center justify-center gap-3 bg-white/[0.03] border border-white/10 shadow-[inset_0_1px_1px_rgba(255,255,255,0.04)] backdrop-blur-md rounded-xl p-2 px-3.5 w-full lg:w-auto text-xs" id="simulator-chronostat">
+            <div className="flex items-center gap-2 min-w-max">
               <Calendar className="w-4 h-4 text-slate-500" />
-              <div className="text-right">
-                <span className="text-xs font-semibold text-slate-500 font-mono block leading-none uppercase">STATION COORD TIME</span>
-                <span className="text-sm font-bold text-slate-200 mt-1 block font-mono">
+              <div className="text-left font-mono">
+                <span className="text-[9px] font-semibold text-slate-500 block leading-none uppercase tracking-wider">STATION COORD TIME</span>
+                <span className="text-xs md:text-sm font-bold text-slate-200 mt-0.5 block">
                   {new Date(activeTime).toUTCString().replace("GMT", "UTC")}
                 </span>
               </div>
             </div>
 
-            <div className="h-6 w-[1px] bg-slate-800" />
+            <div className="hidden sm:block h-6 w-[1px] bg-slate-800" />
 
             {/* Sunrise & Sunset Indicators */}
-            <div className="flex items-center gap-3">
-              <div className="text-right">
-                <span className="text-xs font-bold text-amber-500 font-mono block leading-none">☀ RISE</span>
-                <span className="text-xs font-semibold text-slate-300 mt-1 block font-mono">
+            <div className="flex items-center gap-2.5 min-w-max">
+              <div className="text-right font-mono">
+                <span className="text-[9px] font-bold text-amber-500 block leading-none tracking-wider">☀ RISE</span>
+                <span className="text-[10px] font-semibold text-slate-300 mt-0.5 block font-bold">
                   {sunrise}
                 </span>
               </div>
-              <div className="h-4 w-[1px] bg-slate-800/60" />
-              <div className="text-right">
-                <span className="text-xs font-bold text-indigo-400 font-mono block leading-none">☽ SET</span>
-                <span className="text-xs font-semibold text-slate-300 mt-1 block font-mono">
+              <div className="h-5 w-[1px] bg-slate-800/60" />
+              <div className="text-right font-mono">
+                <span className="text-[9px] font-bold text-indigo-400 block leading-none tracking-wider">☽ SET</span>
+                <span className="text-[10px] font-semibold text-slate-300 mt-0.5 block font-bold">
                   {sunset}
                 </span>
               </div>
             </div>
 
-            <div className="h-6 w-[1px] bg-slate-800" />
+            <div className="hidden sm:block h-6 w-[1px] bg-slate-800" />
 
             {/* Time speed multiplier */}
-            <div className="flex items-center gap-1.5">
+            <div className="flex items-center gap-1 min-w-max">
               <button
                 onClick={() => setTimeMultiplier(0)}
-                className={`p-1.5 rounded transition ${timeMultiplier === 0 ? 'bg-slate-800 text-indigo-400' : 'text-slate-500 hover:text-white'}`}
+                className={`p-1.5 rounded transition cursor-pointer ${timeMultiplier === 0 ? 'bg-slate-800 text-indigo-400' : 'text-slate-500 hover:text-white'}`}
                 title="Pause celestial drift"
                 id="pause-sim-btn"
               >
@@ -634,7 +657,7 @@ export default function App() {
               </button>
               <button
                 onClick={() => setTimeMultiplier(1)}
-                className={`p-1.5 rounded transition ${timeMultiplier === 1 ? 'bg-slate-800 text-indigo-400' : 'text-slate-500 hover:text-white'}`}
+                className={`p-1.5 rounded transition cursor-pointer ${timeMultiplier === 1 ? 'bg-slate-800 text-indigo-400' : 'text-slate-500 hover:text-white'}`}
                 title="Real-time motion"
                 id="realtime-sim-btn"
               >
@@ -642,7 +665,7 @@ export default function App() {
               </button>
               <button
                 onClick={() => setTimeMultiplier(10)}
-                className={`p-1.5 rounded transition ${timeMultiplier === 10 ? 'bg-slate-800 text-indigo-400' : 'text-slate-500 hover:text-white'}`}
+                className={`p-1.5 rounded transition cursor-pointer ${timeMultiplier === 10 ? 'bg-slate-800 text-indigo-400' : 'text-slate-500 hover:text-white'}`}
                 title="10x Sidereal speed"
                 id="fast-sim-btn-1"
               >
@@ -650,11 +673,11 @@ export default function App() {
               </button>
               <button
                 onClick={() => setTimeMultiplier(300)}
-                className={`p-1.5 rounded transition ${timeMultiplier === 300 ? 'bg-slate-800 text-indigo-400' : 'text-slate-500 hover:text-white'}`}
+                className={`p-1 px-2.5 rounded transition cursor-pointer text-[10px] font-mono font-bold ${timeMultiplier === 300 ? 'bg-slate-800 text-indigo-400' : 'text-slate-500 hover:text-white border border-indigo-500/20'}`}
                 title="300x Orbit warp"
                 id="fast-sim-btn-2"
               >
-                <span className="text-xs font-bold font-mono px-0.5">WARP</span>
+                WARP
               </button>
             </div>
           </div>
@@ -678,10 +701,10 @@ export default function App() {
       <main className="flex-1 p-6 lg:p-8 max-w-[1920px] mx-auto w-full grid grid-cols-1 md:grid-cols-2 lg:grid-cols-12 gap-6" id="dashboard-main-grid">
         {/* Left Hand: Controls & Earth Globe View (Size: 4 cols) */}
         <div className="md:col-span-1 lg:col-span-4 flex flex-col gap-6" id="left-column-deck">
-          <div className="h-[280px]">
+          <div className="h-auto lg:h-[280px]">
             <SearchBar onLocationChange={setObserver} currentObserver={observer} />
           </div>
-          <div className="flex-1 min-h-[460px]">
+          <div className="flex-1 min-h-[300px] sm:min-h-[400px] lg:min-h-[460px]">
             <Globe 
               observer={observer} 
               iss={iss} 
@@ -695,6 +718,7 @@ export default function App() {
                 elevationM: 100
               })}
               timeMultiplier={timeMultiplier}
+              onSelectObject={handleSelectObject}
             />
           </div>
           <FunFactPanel object={selectedObject} savedLogs={savedLogs} onGenerateLog={handleAddNewLog} />

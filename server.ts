@@ -24,7 +24,7 @@ const BODY_MAP: Record<string, any> = {
 
 // Create Express app
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 // Middleware
 app.use(express.json());
@@ -567,7 +567,8 @@ async function startServer() {
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Project Zenith Server booting at http://0.0.0.0:${PORT}`);
+    console.log(`Project Zenith Server booting at http://localhost:${PORT}`);
+    console.log(`  ➜  Local:   http://localhost:${PORT}/`);
   });
 }
 

@@ -148,8 +148,8 @@ export function getIssPositionAtTime(timestampMs: number): { latitude: number; l
 }
 
 /**
- * Calculates ISS projected latitude and longitude at 5-minute intervals for the next 90 minutes.
- * Returns an array of [latitude, longitude] coordinates.
+ * Calculates ISS projected latitude and longitude at 1-minute intervals centered on current time.
+ * Returns an array of [latitude, longitude] coordinates from -46 minutes to +46 minutes.
  */
 export function getIssFuturePath(startTimeMs: number): [number, number][] {
   const points: [number, number][] = [];
@@ -158,14 +158,16 @@ export function getIssFuturePath(startTimeMs: number): [number, number][] {
     "2 25544  51.6393 252.1793 0001844 195.1432 232.0673 15.49881845572979"
   );
 
-  // Generate 1-min intervals from 0 to 95 minutes for high-resolution smooth curves
-  for (let mins = 0; mins <= 95; mins += 1) {
+  // Freeze the Earth's rotation at the current start time for a perfect closed-loop ground track projection
+  const gmst = satellite.gstime(new Date(startTimeMs));
+
+  // Generate 1-min intervals from -46 to 46 minutes for high-resolution smooth curves centered on ISS
+  for (let mins = -46; mins <= 46; mins += 1) {
     const time = new Date(startTimeMs + mins * 60 * 1000);
     const positionAndVelocity = satellite.propagate(satrec, time);
     const positionEci = positionAndVelocity.position;
 
     if (positionEci && typeof positionEci !== 'boolean') {
-      const gmst = satellite.gstime(time);
       const positionGd = satellite.eciToGeodetic(positionEci as any, gmst);
       const latDeg = positionGd.latitude * 180 / Math.PI;
       const lngDeg = positionGd.longitude * 180 / Math.PI;
