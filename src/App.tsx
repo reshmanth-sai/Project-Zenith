@@ -32,6 +32,7 @@ import { Observer, CelestialObject, ObsLog } from './types';
 import { useObserver } from './context/ObserverContext';
 import { getIssPositionAtTime } from './lib/satellite';
 import { getSunriseSunset } from './lib/astronomy';
+import { getSatellitePosition } from './lib/satellite_helper';
 
 // Pre-populated sample log to look pristine out of the box
 const DEFAULT_LOGS: ObsLog[] = [
@@ -396,18 +397,14 @@ export default function App() {
       { id: "terra", name: "Terra satellite", color: "#10b981", lat: 35, lng: -100, magnitude: 3.1, description: "NASA flagship Earth observation satellite monitoring land cover.", inclination: 98.3, period: 5940, altitude: 713 },
       { id: "meteosat-11", name: "Meteosat-11", color: "#06b6d4", lat: 0, lng: 0, magnitude: 4.8, description: "EUMETSAT high-orbit weather satellite providing continuous scans.", inclination: 1.3, period: 5120, altitude: 3578 }
     ].map((s, idx) => {
-      // Calculate dynamic positions based on a simple orbit calculation to make it smooth and realistic!
-      const orbitalOffset = (time / 100000) * (idx + 1) * 0.2;
-      const inclinationRad = s.inclination * Math.PI / 180;
-      const angle = orbitalOffset + s.lat;
-      const calcLat = Math.asin(Math.sin(inclinationRad) * Math.sin(angle)) * 180 / Math.PI;
-      const calcLng = ((s.lng + (time / 300000) * 360) % 360) - 180;
+      const seed = idx + 1;
+      const pos = getSatellitePosition(s.inclination, s.period, s.altitude, seed, time);
 
       const localCoords = calculateSatelliteAltAz(
         observer.latitude,
         observer.longitude,
-        calcLat,
-        calcLng,
+        pos.latitude,
+        pos.longitude,
         s.altitude
       );
 
@@ -417,7 +414,7 @@ export default function App() {
         type: "satellite" as const,
         color: s.color,
         size: s.id === 'tiangong' ? 6 : 4,
-        coordinates: { latitude: parseFloat(calcLat.toFixed(4)), longitude: parseFloat(calcLng.toFixed(4)) },
+        coordinates: { latitude: parseFloat(pos.latitude.toFixed(4)), longitude: parseFloat(pos.longitude.toFixed(4)) },
         localCoordinates: localCoords,
         description: s.description,
         magnitude: s.magnitude,
