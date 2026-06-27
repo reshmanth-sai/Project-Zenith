@@ -171,13 +171,11 @@ interface FlyToConfig {
 }
 
 // Zoom/Pan animation controller
-function MapViewController({ flyToCoords, timeMultiplier, cameraLocked, programmaticFlyRef }: { flyToCoords: FlyToConfig | null; timeMultiplier: number; cameraLocked: boolean; programmaticFlyRef: React.MutableRefObject<boolean> }) {
+function MapViewController({ flyToCoords, timeMultiplier, cameraLocked, cameraLockedRef, programmaticFlyRef }: { flyToCoords: FlyToConfig | null; timeMultiplier: number; cameraLocked: boolean; cameraLockedRef: React.RefObject<boolean>; programmaticFlyRef: React.MutableRefObject<boolean> }) {
   const map = useMap();
   const lastCenterRef = useRef<[number, number] | null>(null);
   const targetCoordsRef = useRef<[number, number] | null>(null);
   const animationFrameRef = useRef<number | null>(null);
-  const cameraLockedRef = useRef(cameraLocked);
-  cameraLockedRef.current = cameraLocked;
 
   useEffect(() => {
     if (!map) return;
@@ -212,6 +210,13 @@ function MapViewController({ flyToCoords, timeMultiplier, cameraLocked, programm
       cancelAnimationFrame(animationFrameRef.current);
     }
     const tick = () => {
+      if (!cameraLockedRef.current) {
+        if (animationFrameRef.current) {
+          cancelAnimationFrame(animationFrameRef.current);
+          animationFrameRef.current = null;
+        }
+        return;
+      }
       if (targetCoordsRef.current && map) {
         const [targetLat, targetLng] = targetCoordsRef.current;
         const currentCenter = map.getCenter();
@@ -238,7 +243,7 @@ function MapViewController({ flyToCoords, timeMultiplier, cameraLocked, programm
       animationFrameRef.current = requestAnimationFrame(tick);
     };
     animationFrameRef.current = requestAnimationFrame(tick);
-  }, [map, timeMultiplier]);
+  }, [map, timeMultiplier, cameraLockedRef]);
 
   // Update target when flyToCoords changes
   useEffect(() => {
@@ -284,6 +289,9 @@ function MapViewController({ flyToCoords, timeMultiplier, cameraLocked, programm
         cancelAnimationFrame(animationFrameRef.current);
         animationFrameRef.current = null;
       }
+      map.stop(); // Stop ongoing Leaflet animations (flyTo/panTo)
+      lastCenterRef.current = null;
+      targetCoordsRef.current = null;
       return;
     }
 
@@ -310,10 +318,8 @@ function CenterTracker({ setViewCenter, onUserInteraction, programmaticFlyRef }:
       setViewCenter([center.lat, center.lng]);
     },
     dragstart() {
-      // Only treat as user interaction if NOT a programmatic flyTo
-      if (!programmaticFlyRef.current) {
-        onUserInteraction();
-      }
+      // User drag should always unlock the camera and stop any active flyTo/panTo
+      onUserInteraction();
     },
     zoomstart() {
       // Only treat as user interaction if NOT a programmatic flyTo
@@ -331,7 +337,12 @@ export default function Globe({ observer, iss, satellites, onSelectCoordinates, 
   
   const [flyToCoords, setFlyToCoords] = useState<FlyToConfig | null>(null);
   const [viewCenter, setViewCenter] = useState<[number, number]>(DEFAULT_CENTER);
-  const [cameraLocked, setCameraLocked] = useState<boolean>(true);
+  const [cameraLocked, _setCameraLocked] = useState<boolean>(true);
+  const cameraLockedRef = useRef<boolean>(true);
+  const setCameraLocked = useCallback((val: boolean) => {
+    cameraLockedRef.current = val;
+    _setCameraLocked(val);
+  }, []);
   const [mapTheme, setMapTheme] = useState<'dark' | 'satellite'>('satellite');
   const prevSelectedIdRef = useRef<string | null>(null);
   const programmaticFlyRef = useRef<boolean>(false);
@@ -739,7 +750,7 @@ export default function Globe({ observer, iss, satellites, onSelectCoordinates, 
               <MapEventsHandler onMapClick={handleMapClick} />
               
               {/* Zoom/Pan animation controller */}
-              <MapViewController flyToCoords={flyToCoords} timeMultiplier={timeMultiplier} cameraLocked={cameraLocked} programmaticFlyRef={programmaticFlyRef} />
+              <MapViewController flyToCoords={flyToCoords} timeMultiplier={timeMultiplier} cameraLocked={cameraLocked} cameraLockedRef={cameraLockedRef} programmaticFlyRef={programmaticFlyRef} />
 
               {/* Map view center tracker with auto-unlock interaction trigger */}
               <CenterTracker setViewCenter={setViewCenter} onUserInteraction={() => setCameraLocked(false)} programmaticFlyRef={programmaticFlyRef} />
